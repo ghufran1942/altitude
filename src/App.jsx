@@ -175,6 +175,11 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
   const [toasts, setToasts] = useState([]);
   const [notifState, setNotifState] = useState(currentNotifState());
 
+  // mobile layout
+  const [isPhone, setIsPhone] = useState(false);
+  const [mobileTab, setMobileTab] = useState("pomodoro"); // pomodoro | activity | goals
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+
   const distractRef = useRef(null);
   const addRef = useRef(null);
   const saveTimer = useRef(null);
@@ -243,6 +248,22 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
     });
     return unsub;
   }, [userId, hydrate]);
+
+  /* ---------- page background follows theme ---------- */
+  useEffect(() => {
+    document.body.style.background = dark ? "#101820" : "#F3F6F8";
+  }, [dark]);
+
+  /* ---------- phone detection ---------- */
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 1100px)");
+    const on = () => setIsPhone(mq.matches);
+    on();
+    mq.addEventListener ? mq.addEventListener("change", on) : mq.addListener(on);
+    return () => {
+      mq.removeEventListener ? mq.removeEventListener("change", on) : mq.removeListener(on);
+    };
+  }, []);
 
   /* ---------- timer tick ---------- */
   useEffect(() => {
@@ -498,6 +519,14 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
     return () => window.removeEventListener("click", close);
   }, [openMenuId]);
 
+  // close header (hamburger) menu on outside click
+  useEffect(() => {
+    if (!headerMenuOpen) return;
+    const close = () => setHeaderMenuOpen(false);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [headerMenuOpen]);
+
   /* ---------- distraction ---------- */
   const [distractText, setDistractText] = useState("");
   function logDistraction() {
@@ -542,6 +571,40 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
   });
   const iconBtn = { ...btn(), padding: "6px 10px", fontSize: 12 };
 
+  // The header action buttons — inline on desktop, stacked in the hamburger on phone.
+  const closeMenu = () => setHeaderMenuOpen(false);
+  const headerActions = (
+    <>
+      <button style={{ ...iconBtn, ...(overdueCount ? { borderColor: C.danger, color: C.danger } : soonCount ? { borderColor: C.amber, color: C.amber } : {}) }}
+        onClick={() => { setShowDeadlines(true); closeMenu(); }}>
+        Deadlines{overdueCount ? ` · ${overdueCount} overdue` : soonCount ? ` · ${soonCount} soon` : ""}
+      </button>
+      <button style={iconBtn} onClick={() => { setShowStats(true); closeMenu(); }}>Stats</button>
+      <button style={iconBtn} onClick={() => { setShowLog(true); closeMenu(); }}>
+        Distraction log{distractions.length ? ` (${distractions.length})` : ""}
+      </button>
+      <button style={iconBtn} onClick={() => { setShowSettings(true); closeMenu(); }}>Timer settings</button>
+      <button style={iconBtn} onClick={() => { setDark((d) => !d); closeMenu(); }}>{dark ? "Light" : "Dark"}</button>
+      {syncOn ? (
+        <span title={accountEmail ? `Synced · ${accountEmail}` : "Synced across your devices"}
+          style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, fontSize: 12, fontWeight: 600, color: C.accent,
+            border: `1px solid ${C.accent}`, borderRadius: 999, padding: "5px 10px" }}>
+          <span style={{ width: 7, height: 7, borderRadius: 999, background: C.accent }} /> Synced
+        </span>
+      ) : (
+        <span title="Data is stored on this device only"
+          style={{ fontSize: 12, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 999, padding: "5px 10px", textAlign: "center" }}>
+          Local only
+        </span>
+      )}
+      {syncOn ? (
+        <button style={iconBtn} onClick={() => { onSignOut(); closeMenu(); }}>Sign out</button>
+      ) : cloudEnabled && onGoOnline ? (
+        <button style={iconBtn} onClick={() => { onGoOnline(); closeMenu(); }}>Sign in to sync</button>
+      ) : null}
+    </>
+  );
+
   return (
     <div style={{ minHeight: "100vh", background: C.bg, color: C.ink, fontFamily: font }}>
       <style>{`
@@ -564,46 +627,53 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
         flexWrap: "wrap",
       }}>
         <div style={{ fontFamily: display, fontWeight: 800, fontSize: 18, letterSpacing: "-0.02em" }}>ALTITUDE</div>
-        <div style={{ fontSize: 12, color: C.muted }}>zoom out to plan · zoom in to act</div>
+        {!isPhone && <div style={{ fontSize: 12, color: C.muted }}>zoom out to plan · zoom in to act</div>}
         <div style={{ flex: 1 }} />
         <div title="Consecutive days with at least one completed pomodoro or task"
           style={{ fontSize: 13, fontWeight: 600, color: streak.current > 0 ? C.amber : C.muted }}>
-          ⚑ {streak.current}d streak <span style={{ color: C.muted, fontWeight: 400 }}>· best {streak.best}</span>
+          ⚑ {streak.current}d<span style={{ color: C.muted, fontWeight: 400 }}>{isPhone ? "" : ` streak · best ${streak.best}`}</span>
         </div>
-        <button style={{ ...iconBtn, ...(overdueCount ? { borderColor: C.danger, color: C.danger } : soonCount ? { borderColor: C.amber, color: C.amber } : {}) }}
-          onClick={() => setShowDeadlines(true)}>
-          Deadlines{overdueCount ? ` · ${overdueCount} overdue` : soonCount ? ` · ${soonCount} soon` : ""}
-        </button>
-        <button style={iconBtn} onClick={() => setShowStats(true)}>Stats</button>
-        <button style={iconBtn} onClick={() => setShowLog(true)}>
-          Distraction log{distractions.length ? ` (${distractions.length})` : ""}
-        </button>
-        <button style={iconBtn} onClick={() => setShowSettings(true)}>Timer settings</button>
-        <button style={iconBtn} onClick={() => setDark((d) => !d)}>{dark ? "Light" : "Dark"}</button>
-        {syncOn ? (
-          <span title={accountEmail ? `Synced · ${accountEmail}` : "Synced across your devices"}
-            style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: C.accent,
-              border: `1px solid ${C.accent}`, borderRadius: 999, padding: "5px 10px" }}>
-            <span style={{ width: 7, height: 7, borderRadius: 999, background: C.accent }} /> Synced
-          </span>
-        ) : (
-          <span title="Data is stored on this device only"
-            style={{ fontSize: 12, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 999, padding: "5px 10px" }}>
-            Local only
-          </span>
-        )}
-        {syncOn ? (
-          <button style={iconBtn} onClick={onSignOut}>Sign out</button>
-        ) : cloudEnabled && onGoOnline ? (
-          <button style={iconBtn} onClick={onGoOnline}>Sign in to sync</button>
-        ) : null}
+
+        {isPhone ? (
+          <>
+            <button aria-label="Menu" aria-expanded={headerMenuOpen}
+              style={{ ...iconBtn, fontSize: 18, lineHeight: 1, padding: "4px 10px" }}
+              onClick={(e) => { e.stopPropagation(); setHeaderMenuOpen((o) => !o); }}>☰</button>
+            {headerMenuOpen && (
+              <div onClick={(e) => e.stopPropagation()}
+                style={{ position: "absolute", top: "100%", right: 12, marginTop: 8, zIndex: 40,
+                  background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12,
+                  boxShadow: "0 10px 30px rgba(0,0,0,.22)", padding: 8, minWidth: 210,
+                  display: "flex", flexDirection: "column", gap: 6 }}>
+                {headerActions}
+              </div>
+            )}
+          </>
+        ) : headerActions}
       </header>
 
+      {/* ===== mobile tab bar ===== */}
+      {isPhone && (
+        <div style={{ display: "flex", gap: 6, padding: "10px 16px", background: C.surface,
+          borderBottom: `1px solid ${C.border}`, position: "sticky", top: 57, zIndex: 25 }}>
+          {[["pomodoro", "Pomodoro"], ["activity", "Activity"], ["goals", "Goals"]].map(([k, label]) => (
+            <button key={k} onClick={() => setMobileTab(k)}
+              style={{ flex: 1, padding: "9px 4px", borderRadius: 9, fontFamily: font, fontWeight: 700, fontSize: 13, cursor: "pointer",
+                border: `1px solid ${mobileTab === k ? C.accent : C.border}`,
+                background: mobileTab === k ? C.accent : "transparent",
+                color: mobileTab === k ? C.accentInk : C.muted }}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
       <main style={{
-        display: "grid", gap: 20, padding: 20, maxWidth: 1200, margin: "0 auto",
+        display: isPhone && mobileTab === "activity" ? "none" : "grid",
+        gap: 20, padding: 20, maxWidth: 1200, margin: "0 auto",
         gridTemplateColumns: "minmax(300px, 380px) 1fr",
       }}>
-        <style>{`@media (max-width: 860px) {
+        <style>{`@media (max-width: 1100px) {
           main { grid-template-columns: 1fr !important; }
           .timerPanel { position: static !important; top: auto !important; }
         }`}</style>
@@ -612,6 +682,7 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
         <section className="timerPanel" style={{
           background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14,
           padding: 22, alignSelf: "start", position: "sticky", top: 78,
+          ...(isPhone ? { display: mobileTab === "pomodoro" ? "block" : "none" } : {}),
         }}>
           <div style={{ display: "flex", gap: 6, marginBottom: 18 }}>
             {[["work", "Focus"], ["short", "Short break"], ["long", "Long break"]].map(([p, label]) => (
@@ -698,7 +769,8 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
         </section>
 
         {/* ===== right: hierarchy ===== */}
-        <section style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 22, minHeight: 500 }}>
+        <section style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 22, minHeight: 500,
+          ...(isPhone ? { display: mobileTab === "goals" ? "block" : "none" } : {}) }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 6 }}>
             <button style={{ ...btn(), padding: "6px 12px" }} disabled={focusId === null}
               onClick={() => setFocusId(nodeById.get(focusId)?.parentId ?? null)} title="Zoom out one level">◀ Zoom out</button>
@@ -762,8 +834,9 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
         </section>
       </main>
 
-      {/* ===== heatmap band ===== */}
-      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 20px 28px" }}>
+      {/* ===== heatmap band (also the Activity tab on phone) ===== */}
+      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 20px 28px",
+        ...(isPhone ? { display: mobileTab === "activity" ? "block" : "none", paddingTop: 20 } : {}) }}>
         <section style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 22 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
             <div style={{ fontFamily: display, fontWeight: 700, fontSize: 15 }}>Activity</div>
@@ -772,6 +845,11 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
             </div>
           </div>
           <Heatmap C={C} completions={completions} />
+          {isPhone && (
+            <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 20, paddingTop: 18 }}>
+              <StatsView C={C} sessions={sessions} nodeById={nodeById} streak={streak} />
+            </div>
+          )}
         </section>
       </div>
 

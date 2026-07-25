@@ -1,0 +1,12 @@
+{
+  "appId": "com.ghufranaltitude.focus",
+  "appName": "Altitude",
+  "webDir": "dist",
+  "backgroundColor": "#101820",
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_icon_config_sample",
+      "iconColor": "#0F7C66"
+    }
+  }
+}
