@@ -246,6 +246,7 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
 
   // mobile layout
   const [isPhone, setIsPhone] = useState(false);
+  const [isNarrow, setIsNarrow] = useState(false);
   const [mobileTab, setMobileTab] = useState("pomodoro"); // pomodoro | activity | goals
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
 
@@ -325,14 +326,19 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
     document.body.style.background = dark ? "#101820" : "#F3F6F8";
   }, [dark]);
 
-  /* ---------- phone detection ---------- */
+  /* ---------- breakpoints ---------- */
   useEffect(() => {
-    const mq = window.matchMedia("(max-width: 1100px)");
-    const on = () => setIsPhone(mq.matches);
+    // 1100px switches the page to tabs; 640px is where a tree row runs out of
+    // horizontal room and has to fold its buttons into the ⋯ menu
+    const wide = window.matchMedia("(max-width: 1100px)");
+    const narrow = window.matchMedia("(max-width: 640px)");
+    const on = () => { setIsPhone(wide.matches); setIsNarrow(narrow.matches); };
     on();
-    mq.addEventListener ? mq.addEventListener("change", on) : mq.addListener(on);
+    [wide, narrow].forEach((mq) =>
+      mq.addEventListener ? mq.addEventListener("change", on) : mq.addListener(on));
     return () => {
-      mq.removeEventListener ? mq.removeEventListener("change", on) : mq.removeListener(on);
+      [wide, narrow].forEach((mq) =>
+        mq.removeEventListener ? mq.removeEventListener("change", on) : mq.removeListener(on));
     };
   }, []);
 
@@ -1060,7 +1066,8 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
         </section>
 
         {/* ===== right: hierarchy ===== */}
-        <section style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 22, minHeight: 500,
+        <section style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14,
+          padding: isNarrow ? 14 : 22, minHeight: 500, minWidth: 0, overflowX: "hidden",
           ...(isPhone ? { display: mobileTab === "goals" ? "block" : "none" } : {}) }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, minHeight: 32 }}>
             {focusId && (
@@ -1084,7 +1091,7 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
             </div>
           </div>
 
-          <QuickAdd inputRef={addRef} C={C} font={font}
+          <QuickAdd inputRef={addRef} C={C} font={font} compact={isNarrow}
             placeholder="New item — type and press Enter"
             onAdd={(t) => addNode(focusId, t)}
             onAddHeading={(t) => addNode(focusId, t, "heading")} />
@@ -1103,6 +1110,7 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
                   p={progressOf(n.id)}
                   isActive={n.id === activeTaskId}
                   remindersOn={notifState === "granted"}
+                  compact={isNarrow}
                   dragging={dragId === n.id}
                   dropPos={dropAt && dropAt.id === n.id ? dropAt.pos : null}
                   onDragStart={(e) => startDrag(n.id, e)}
@@ -1133,18 +1141,18 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
                   }}
                   menuOpen={openMenuId === n.id}
                   onToggleMenu={(e) => { e.stopPropagation(); setOpenMenuId(openMenuId === n.id ? null : n.id); }}
-                  onZoomIn={() => setFocusId(n.id)}
+                  onZoomIn={() => { setOpenMenuId(null); setFocusId(n.id); }}
                   onToggleExpand={(deep) => toggleExpand(n.id, deep)}
-                  onAddChild={() => setAddChildTo(addChildTo === n.id ? null : n.id)}
+                  onAddChild={() => { setOpenMenuId(null); setAddChildTo(addChildTo === n.id ? null : n.id); }}
                   onToggle={() => toggleDone(n.id)}
                   onRequestDelete={() => { setOpenMenuId(null); setConfirmDelete(n); }}
-                  onActivate={() => setActiveTaskId(n.id === activeTaskId ? null : n.id)}
-                  onShrink={() => setShrinkTarget(n)}
+                  onActivate={() => { setOpenMenuId(null); setActiveTaskId(n.id === activeTaskId ? null : n.id); }}
+                  onShrink={() => { setOpenMenuId(null); setShrinkTarget(n); }}
                   onSetDeadline={() => { setOpenMenuId(null); setDeadlineTarget(n); }}
                   onMove={() => { setOpenMenuId(null); setMoveTarget(n); }} />
                 {addChildTo === n.id && (
-                  <div style={{ marginLeft: (depth + 1) * INDENT }}>
-                    <QuickAdd C={C} font={font} autoFocus
+                  <div style={{ marginLeft: Math.min(depth + 1, isNarrow ? 4 : 12) * (isNarrow ? 10 : INDENT) }}>
+                    <QuickAdd C={C} font={font} autoFocus compact={isNarrow}
                       placeholder={`New item under “${n.title}” — Enter to add, Esc to close`}
                       onAdd={(t) => addNode(n.id, t)}
                       onAddHeading={(t) => addNode(n.id, t, "heading")}
@@ -1335,7 +1343,7 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
    sub-components
    ============================================================ */
 
-function QuickAdd({ C, font, placeholder, onAdd, onAddHeading, onEscape, inputRef, autoFocus }) {
+function QuickAdd({ C, font, placeholder, onAdd, onAddHeading, onEscape, inputRef, autoFocus, compact }) {
   const [v, setV] = useState("");
   function submit(asHeading) {
     if (!v.trim()) return;
@@ -1343,7 +1351,7 @@ function QuickAdd({ C, font, placeholder, onAdd, onAddHeading, onEscape, inputRe
     setV("");
   }
   return (
-    <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 14 }}>
+    <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 14, maxWidth: "100%" }}>
       <input ref={inputRef} autoFocus={autoFocus} value={v} placeholder={placeholder}
         onChange={(e) => setV(e.target.value)}
         onKeyDown={(e) => {
@@ -1354,10 +1362,10 @@ function QuickAdd({ C, font, placeholder, onAdd, onAddHeading, onEscape, inputRe
           border: `1px dashed ${C.border}`, background: "transparent", color: C.ink, fontFamily: font }} />
       {onAddHeading && (
         <button onClick={() => submit(true)} title="Add as a heading (or Shift+Enter)"
-          style={{ fontFamily: font, fontSize: 11, fontWeight: 700, letterSpacing: ".04em", cursor: "pointer",
-            padding: "9px 10px", borderRadius: 8, border: `1px dashed ${C.border}`, whiteSpace: "nowrap",
-            background: "transparent", color: C.muted }}>
-          ＋ heading
+          style={{ fontFamily: font, fontSize: compact ? 14 : 11, fontWeight: 700, letterSpacing: ".04em",
+            cursor: "pointer", padding: compact ? "9px 12px" : "9px 10px", borderRadius: 8, flexShrink: 0,
+            border: `1px dashed ${C.border}`, whiteSpace: "nowrap", background: "transparent", color: C.muted }}>
+          {compact ? "＃" : "＋ heading"}
         </button>
       )}
     </div>
@@ -1407,12 +1415,17 @@ function TitleEditor({ C, font, initial, seq, heading, onCommit, onKey }) {
 function NodeRow({ n, C, font, depth, hasKids, p, isActive, remindersOn, menuOpen, onToggleMenu,
   onZoomIn, onToggle, onToggleExpand, onAddChild, onRequestDelete, onActivate,
   onShrink, onSetDeadline, onMove, dragging, dropPos, onDragStart,
-  editing, editSeq, onStartEdit, onCommitEdit, onEditKey }) {
+  editing, editSeq, onStartEdit, onCommitEdit, onEditKey, compact }) {
   const heading = isHeading(n);
   const done = !!n.done;
   const pct = p ? Math.round((100 * p.done) / p.total) : 0;
   const dstate = deadlineState(n.deadline);
   const dcol = dstate === "overdue" ? C.danger : dstate === "soon" ? C.amber : C.accent;
+
+  /* Indentation is tighter on a narrow screen and stops growing after a few
+     levels, so a deep branch can't push the row off the side of the phone. */
+  const step = compact ? 10 : INDENT;
+  const pad = Math.min(depth, compact ? 4 : 12) * step;
 
   // a line above/below for reordering, a ring for "drop inside"
   const dropStyle =
@@ -1450,35 +1463,57 @@ function NodeRow({ n, C, font, depth, hasKids, p, isActive, remindersOn, menuOpe
 
   const bar = p && (
     <div title={`${p.done} of ${p.total} direct children done`}
-      style={{ width: 34, height: 6, borderRadius: 3, background: C.ringTrack, overflow: "hidden", flexShrink: 0 }}>
+      style={{ width: compact ? 22 : 34, height: 6, borderRadius: 3, background: C.ringTrack,
+        overflow: "hidden", flexShrink: 0 }}>
       <div style={{ width: `${pct}%`, height: "100%", background: C.accent }} />
     </div>
   );
 
   const actions = (
     <div className="rowActions" style={{ display: "flex", gap: 4, flexShrink: 0, alignItems: "center" }}>
-      {!heading && !hasKids && (
+      {!compact && !heading && !hasKids && (
         <button style={{ ...smallBtn, ...(isActive ? { background: C.accent, color: C.accentInk, borderColor: C.accent } : {}) }}
           onClick={(e) => { e.stopPropagation(); onActivate(); }} title="Link to the Pomodoro timer">
           {isActive ? "◉ active" : "focus"}
         </button>
       )}
-      {!heading && (
+      {!compact && !heading && (
         <button style={smallBtn} onClick={(e) => { e.stopPropagation(); onShrink(); }}
           title="Feels too big? Break it into micro-steps">shrink</button>
       )}
-      <button style={smallBtn} onClick={(e) => { e.stopPropagation(); onAddChild(); }}
-        title="Add something under this">＋</button>
-      <button style={smallBtn} onClick={(e) => { e.stopPropagation(); onZoomIn(); }}
-        title="Zoom in so this is the only thing on screen">open ▸</button>
-      <button style={smallBtn} onClick={onToggleMenu} title="More">⋯</button>
+      {!compact && (
+        <button style={smallBtn} onClick={(e) => { e.stopPropagation(); onAddChild(); }}
+          title="Add something under this">＋</button>
+      )}
+      {!compact && (
+        <button style={smallBtn} onClick={(e) => { e.stopPropagation(); onZoomIn(); }}
+          title="Zoom in so this is the only thing on screen">open ▸</button>
+      )}
+      <button style={{ ...smallBtn, ...(compact && isActive ? { background: C.accent, color: C.accentInk, borderColor: C.accent } : {}) }}
+        onClick={onToggleMenu} title="More">⋯</button>
     </div>
   );
 
   const menu = menuOpen && (
     <div onClick={(e) => e.stopPropagation()} style={{ position: "absolute", top: "100%", right: 8, marginTop: 4, zIndex: 15,
       background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(0,0,0,.18)",
-      minWidth: 160, overflow: "hidden" }}>
+      minWidth: 180, overflow: "hidden" }}>
+      {/* on a narrow screen these four live here instead of on the row */}
+      {compact && (
+        <button style={menuItem} onClick={onZoomIn}>Open ▸</button>
+      )}
+      {compact && (
+        <button style={menuItem} onClick={onAddChild}>Add item inside</button>
+      )}
+      {compact && !heading && (
+        <button style={menuItem} onClick={onShrink}>Break into micro-steps</button>
+      )}
+      {compact && !heading && !hasKids && (
+        <button style={menuItem} onClick={onActivate}>
+          {isActive ? "◉ Unlink from timer" : "Link to timer"}
+        </button>
+      )}
+      {compact && <div style={{ borderTop: `1px solid ${C.border}` }} />}
       <button style={menuItem} onClick={() => { onStartEdit(); onToggleMenu({ stopPropagation() {} }); }}>Rename</button>
       {!heading && (
         <button style={menuItem} onClick={onSetDeadline}>{n.deadline ? "Edit deadline" : "Set deadline"}</button>
@@ -1493,7 +1528,7 @@ function NodeRow({ n, C, font, depth, hasKids, p, isActive, remindersOn, menuOpe
     return (
       <div className="row" data-node-id={n.id} onDoubleClick={onZoomIn} title="Double-click to zoom in"
         style={{ position: "relative", display: "flex", alignItems: "center", gap: 8, cursor: "pointer",
-          marginLeft: depth * INDENT, padding: "12px 4px 4px", borderBottom: `1px solid ${C.border}`,
+          marginLeft: pad, padding: "12px 4px 4px", borderBottom: `1px solid ${C.border}`,
           opacity: dragging ? 0.4 : 1, userSelect: "none", ...dropStyle }}>
         {grip}
         {caret}
@@ -1516,11 +1551,12 @@ function NodeRow({ n, C, font, depth, hasKids, p, isActive, remindersOn, menuOpe
   /* ---- item ---- */
   return (
     <div className="row" data-node-id={n.id} onDoubleClick={onZoomIn} title="Double-click to zoom in"
-      style={{ position: "relative", display: "flex", alignItems: "flex-start", gap: 10, padding: "10px 12px",
-        marginLeft: depth * INDENT, cursor: "pointer", opacity: dragging ? 0.4 : 1, userSelect: "none",
+      style={{ position: "relative", display: "flex", alignItems: "flex-start",
+        gap: compact ? 8 : 10, padding: compact ? "10px 8px" : "10px 12px",
+        marginLeft: pad, cursor: "pointer", opacity: dragging ? 0.4 : 1, userSelect: "none",
         border: `1px solid ${isActive ? C.accent : C.border}`, borderRadius: 10,
         background: isActive ? (C.bg === "#101820" ? "#152a25" : "#F0F7F5") : C.surface, ...dropStyle }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, paddingTop: 1 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: compact ? 6 : 8, paddingTop: 1, flexShrink: 0 }}>
         {grip}
         {caret}
         <button onClick={(e) => { e.stopPropagation(); onToggle(); }}
