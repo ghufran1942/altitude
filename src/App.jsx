@@ -919,7 +919,6 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
         flexWrap: "wrap",
       }}>
         <div style={{ fontFamily: display, fontWeight: 800, fontSize: 18, letterSpacing: "-0.02em" }}>ALTITUDE</div>
-        {!isPhone && <div style={{ fontSize: 12, color: C.muted }}>zoom out to plan · zoom in to act</div>}
         <div style={{ flex: 1 }} />
         <div title="Consecutive days with at least one completed pomodoro or task"
           style={{ fontSize: 13, fontWeight: 600, color: streak.current > 0 ? C.amber : C.muted }}>
