@@ -142,6 +142,164 @@ function seedNodes() {
 }
 const DEFAULT_SETTINGS = { work: 25, short: 5, long: 15, cyclesToLong: 4 };
 
+/* ---------- habits ---------- */
+
+function shiftKey(key, delta) {
+  const [y, m, d] = key.split("-").map(Number);
+  return todayKey(new Date(y, m - 1, d + delta));
+}
+
+function keysBetween(fromKey, toKey) {
+  const out = [];
+  let k = toKey;
+  while (k >= fromKey) { out.push(k); k = shiftKey(k, -1); }
+  return out;
+}
+
+// Shared by the focus streak and the habit streak so the two can't drift apart.
+function streakFrom(daySet) {
+  let cur = 0;
+  let i = daySet.has(todayKey()) ? 0 : 1;
+  if (!daySet.has(todayKey()) && !daySet.has(daysAgoKey(1))) i = 0;
+  for (; ; i++) { if (daySet.has(daysAgoKey(i))) cur++; else break; }
+  const sorted = [...daySet].sort();
+  let best = 0, run = 0, prev = null;
+  sorted.forEach((k) => {
+    if (prev) { const a = new Date(prev), b = new Date(k); run = (b - a) / 86400000 === 1 ? run + 1 : 1; }
+    else run = 1;
+    best = Math.max(best, run);
+    prev = k;
+  });
+  return { current: cur, best: Math.max(best, cur) };
+}
+
+function seedHabits() {
+  const t = todayKey();
+  return [
+    { id: "hb-move", name: "Move", icon: "🏃", order: 0, active: true, createdAt: t },
+    { id: "hb-read", name: "Read", icon: "📖", order: 1, active: true, createdAt: t },
+    { id: "hb-water", name: "Water", icon: "💧", order: 2, active: true, createdAt: t },
+  ];
+}
+
+const doneOn = (log, key, id) => !!(log[key] && log[key][id]);
+const dayCount = (log, key, ids) => ids.reduce((n, id) => n + (doneOn(log, key, id) ? 1 : 0), 0);
+
+// Every day from the earliest logged day (or earliest habit) to today, newest first.
+// The createdAt floor is what stops an empty tracker rendering back to 1970.
+function habitDayKeys(habits, log) {
+  const keys = Object.keys(log).filter((k) => Object.values(log[k] || {}).some(Boolean));
+  const created = habits.map((h) => h.createdAt).filter(Boolean);
+  const earliest = [...keys, ...created].sort()[0] || todayKey();
+  return keysBetween(earliest, todayKey());
+}
+
+const WD = ["M", "T", "W", "T", "F", "S", "S"];
+const WD_FULL = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+const keyWeekday = (key) => {                      // Monday = 0
+  const [y, m, d] = key.split("-").map(Number);
+  return (new Date(y, m - 1, d).getDay() + 6) % 7;
+};
+const weekStart = (key) => shiftKey(key, -keyWeekday(key));
+
+// Three Monday-aligned calendar weeks ending with the week containing `endKey`.
+function threeWeeks(endKey = todayKey()) {
+  const start = shiftKey(weekStart(endKey), -14);
+  return [0, 1, 2].map((w) => Array.from({ length: 7 }, (_, i) => shiftKey(start, w * 7 + i)));
+}
+
+function sinceLabel(key) {
+  if (!key) return "Never";
+  if (key === todayKey()) return "Today";
+  if (key === daysAgoKey(1)) return "Yesterday";
+  for (let i = 2; i <= 60; i++) if (key === daysAgoKey(i)) return `${i}d ago`;
+  return key;
+}
+
+function habitStats(habits, log) {
+  const days = habitDayKeys(habits, log); // newest first
+  const live = habits.filter((h) => h.active).sort((a, b) => a.order - b.order);
+  const rateOver = (id, arr) => (arr.length ? arr.filter((k) => doneOn(log, k, id)).length / arr.length : 0);
+
+  const rows = live.map((h) => {
+    // Score a habit from whichever came first: the day it was created, or the
+    // oldest day it was actually logged. Demo history and backfilled days both
+    // land before createdAt, and clipping at createdAt alone hides all of them.
+    const firstLogged = days.filter((k) => doneOn(log, k, h.id)).pop() || null;
+    const floor = [h.createdAt, firstLogged].filter(Boolean).sort()[0] || null;
+    const hDays = floor ? days.filter((k) => k >= floor) : days;
+    const last90 = hDays.slice(0, 90), r30 = hDays.slice(0, 30), p30 = hDays.slice(30, 60);
+    const st = streakFrom(new Set(hDays.filter((k) => doneOn(log, k, h.id))));
+    const wd = Array.from({ length: 7 }, (_, i) => {
+      const sub = hDays.filter((k) => keyWeekday(k) === i);
+      return sub.length ? sub.filter((k) => doneOn(log, k, h.id)).length / sub.length : 0;
+    });
+    const rec = rateOver(h.id, r30), pri = rateOver(h.id, p30);
+    return {
+      habit: h,
+      rate: rateOver(h.id, last90),
+      streak: st.current,
+      best: st.best,
+      lastKey: hDays.find((k) => doneOn(log, k, h.id)) || null,
+      wd,
+      // needs a full prior window, otherwise a young tracker reads as "collapsing"
+      momentum: p30.length >= 14 ? rec - pri : null,
+      atRisk: p30.length >= 14 && pri >= 0.4 && rec <= pri - 0.15,
+    };
+  });
+
+  const ranked = [...rows].sort((a, b) => b.rate - a.rate);
+  const agg = Array.from({ length: 7 }, (_, i) =>
+    rows.length ? rows.reduce((s, r) => s + r.wd[i], 0) / rows.length : 0);
+
+  return {
+    rows, ranked, agg, span: days.length,
+    best: ranked[0] || null,
+    worst: ranked.length > 1 ? ranked[ranked.length - 1] : null,
+    longest: rows.reduce((b, r) => (r.best > (b ? b.best : -1) ? r : b), null),
+    bestDay: agg.indexOf(Math.max(...agg)),
+    worstDay: agg.indexOf(Math.min(...agg)),
+    spread: rows.length ? Math.max(...agg) - Math.min(...agg) : 0,
+  };
+}
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Seeded, so the same habits always produce the same history — a demo that
+// reshuffles on every click is hard to reason about.
+function demoHabitLog(habits, days = 120) {
+  const live = habits.filter((h) => h.active).sort((a, b) => a.order - b.order);
+  const profiles = [
+    { base: 0.93, weekend: 0.05, drift: 0.0 },   // solid
+    { base: 0.80, weekend: 0.30, drift: 0.0 },   // weekdays only
+    { base: 0.74, weekend: 0.22, drift: -0.45 }, // slipping — trips "at risk"
+    { base: 0.40, weekend: 0.18, drift: 0.30 },  // improving
+  ];
+  const log = {};
+  live.forEach((h, hi) => {
+    const p = profiles[hi % profiles.length];
+    const rnd = mulberry32(1000 + hi * 7919);
+    for (let i = days - 1; i >= 0; i--) {
+      const key = daysAgoKey(i);
+      const age = 1 - i / days; // 0 oldest, 1 newest
+      const chance = p.base + p.drift * (age - 0.5) * 2 - (keyWeekday(key) >= 5 ? p.weekend : 0);
+      if (rnd() < Math.max(0, Math.min(1, chance))) {
+        if (!log[key]) log[key] = {};
+        log[key][h.id] = true;
+      }
+    }
+  });
+  return log;
+}
+
 /* ============================================================
    Root — auth gate. Decides between the sign-in screen, local-only
    mode, and the signed-in synced app.
@@ -205,6 +363,10 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
   const [activeTaskId, setActiveTaskId] = useState(null);
   const [reminded, setReminded] = useState({}); // {nodeId: 'soon'|'overdue'}
 
+  const [habits, setHabits] = useState([]);
+  const [habitLog, setHabitLog] = useState({}); // { "2026-03-10": { habitId: true } }
+  const [demoHabits, setDemoHabits] = useState(false); // habitLog is invented, not real
+
   const [focusId, setFocusId] = useState(null);
 
   // timer
@@ -247,8 +409,12 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
   // mobile layout
   const [isPhone, setIsPhone] = useState(false);
   const [isNarrow, setIsNarrow] = useState(false);
-  const [mobileTab, setMobileTab] = useState("pomodoro"); // pomodoro | activity | goals
+  const [mobileTab, setMobileTab] = useState("pomodoro"); // pomodoro | habits | activity | goals
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
+
+  const [habitDate, setHabitDate] = useState(todayKey()); // which day the habit list edits
+  const [activityView, setActivityView] = useState("focus"); // focus | habits
+  const [showHabitManager, setShowHabitManager] = useState(false);
 
   const distractRef = useRef(null);
   const addRef = useRef(null);
@@ -270,13 +436,16 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
     setSettings({ ...DEFAULT_SETTINGS, ...(s?.settings || {}) });
     setActiveTaskId(s?.activeTaskId || null);
     setReminded(s?.reminded || {});
+    setHabits(s?.habits?.length ? s.habits : seedHabits());
+    setHabitLog(s?.habitLog || {});
+    setDemoHabits(!!s?.demoHabits);
     setDark(!!s?.dark);
     setRemaining((s?.settings?.work || DEFAULT_SETTINGS.work) * 60);
   }, []);
 
   const serialize = useCallback(
-    () => ({ nodes, sessions, completions, distractions, settings, activeTaskId, reminded, dark }),
-    [nodes, sessions, completions, distractions, settings, activeTaskId, reminded, dark]
+    () => ({ nodes, sessions, completions, distractions, settings, activeTaskId, reminded, dark, habits, habitLog, demoHabits }),
+    [nodes, sessions, completions, distractions, settings, activeTaskId, reminded, dark, habits, habitLog, demoHabits]
   );
 
   /* ---------- load: prefer cloud, fall back to local ---------- */
@@ -288,7 +457,9 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
       if (userId) {
         const cloud = await loadCloud(userId);
         if (cloud) initial = cloud;
-        else if (initial) saveCloud(userId, initial); // seed a new account from local data
+        // Seed a new account from local data — but never carry demo history
+        // into the cloud, or a first sign-in would pollute the real account.
+        else if (initial) saveCloud(userId, initial.demoHabits ? { ...initial, habitLog: {}, demoHabits: false } : initial);
       }
       if (cancelled) return;
       hydrate(initial);
@@ -309,8 +480,7 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
       if (userId) saveCloud(userId, s);
     }, 500);
     return () => clearTimeout(saveTimer.current);
-  }, [nodes, sessions, completions, distractions, settings, activeTaskId, reminded, dark, loaded, userId, serialize]);
-
+  }, [nodes, sessions, completions, distractions, settings, activeTaskId, reminded, dark, habits, habitLog, demoHabits, loaded, userId, serialize]);
   /* ---------- realtime: apply edits made on other devices ---------- */
   useEffect(() => {
     if (!userId) return;
@@ -462,26 +632,32 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
   // state, so they deliberately don't land on the stack.
   const snapshot = useCallback(
     (label) => {
-      setUndoStack((s) => [...s.slice(-49), { nodes, completions, label }]);
+      setUndoStack((s) => [...s.slice(-49), { nodes, completions, habits, habitLog, demoHabits, label }]);
       setRedoStack([]);
     },
-    [nodes, completions]
+    [nodes, completions, habits, habitLog, demoHabits]
   );
   function undo() {
     if (!undoStack.length) return;
     const prev = undoStack[undoStack.length - 1];
-    setRedoStack((r) => [...r, { nodes, completions, label: prev.label }]);
+    setRedoStack((r) => [...r, { nodes, completions, habits, habitLog, demoHabits, label: prev.label }]);
     setNodes(prev.nodes);
     setCompletions(prev.completions);
+    setHabits(prev.habits);
+    setHabitLog(prev.habitLog);
+    setDemoHabits(!!prev.demoHabits);
     setUndoStack((s) => s.slice(0, -1));
     setEditingId(null);
   }
   function redo() {
     if (!redoStack.length) return;
     const next = redoStack[redoStack.length - 1];
-    setUndoStack((s) => [...s.slice(-49), { nodes, completions, label: next.label }]);
+    setUndoStack((s) => [...s.slice(-49), { nodes, completions, habits, habitLog, demoHabits, label: next.label }]);
     setNodes(next.nodes);
     setCompletions(next.completions);
+    setHabits(next.habits);
+    setHabitLog(next.habitLog);
+    setDemoHabits(!!next.demoHabits);
     setRedoStack((r) => r.slice(0, -1));
     setEditingId(null);
   }
@@ -708,22 +884,42 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
   }
 
   /* ---------- streaks ---------- */
-  const streak = useMemo(() => {
-    const days = new Set(completions);
-    let cur = 0;
-    let i = days.has(todayKey()) ? 0 : 1;
-    if (!days.has(todayKey()) && !days.has(daysAgoKey(1))) i = 0;
-    for (; ; i++) { if (days.has(daysAgoKey(i))) cur++; else break; }
-    const sorted = [...days].sort();
-    let best = 0, run = 0, prev = null;
-    sorted.forEach((k) => {
-      if (prev) { const a = new Date(prev), b = new Date(k); run = (b - a) / 86400000 === 1 ? run + 1 : 1; }
-      else run = 1;
-      best = Math.max(best, run);
-      prev = k;
+  const streak = useMemo(() => streakFrom(new Set(completions)), [completions]);
+
+  const habitStreak = useMemo(
+    () => streakFrom(new Set(Object.keys(habitLog).filter((k) => Object.values(habitLog[k] || {}).some(Boolean)))),
+    [habitLog]
+  );
+
+  function toggleHabit(habitId, dateKey) {
+    snapshot("habit");
+    setHabitLog((log) => {
+      const day = { ...(log[dateKey] || {}) };
+      if (day[habitId]) delete day[habitId]; else day[habitId] = true;
+      const next = { ...log };
+      // drop the day entirely when it empties, so the log doesn't fill with {}
+      if (Object.keys(day).length) next[dateKey] = day; else delete next[dateKey];
+      return next;
     });
-    return { current: cur, best: Math.max(best, cur) };
-  }, [completions]);
+  }
+
+  function shiftHabitDate(delta) {
+    setHabitDate((k) => {
+      const next = shiftKey(k, delta);
+      return next > todayKey() ? k : next; // no stepping into the future
+    });
+  }
+
+  function loadDemoHabits() {
+    snapshot("demo data");
+    setHabitLog(demoHabitLog(habits));
+    setDemoHabits(true);
+  }
+  function clearHabitHistory() {
+    snapshot("clear habits");
+    setHabitLog({});
+    setDemoHabits(false);
+  }
 
   const pomToday = sessions.filter((s) => s.dateKey === todayKey()).length;
   const pomWeek = useMemo(() => {
@@ -953,9 +1149,9 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
       {isPhone && (
         <div style={{ display: "flex", gap: 6, padding: "10px 16px", background: C.surface,
           borderBottom: `1px solid ${C.border}`, position: "sticky", top: 57, zIndex: 25 }}>
-          {[["pomodoro", "Pomodoro"], ["activity", "Activity"], ["goals", "Goals"]].map(([k, label]) => (
+          {[["pomodoro", "Pomodoro"], ["habits", "Habits"], ["activity", "Activity"], ["goals", "Goals"]].map(([k, label]) => (
             <button key={k} onClick={() => setMobileTab(k)}
-              style={{ flex: 1, padding: "9px 4px", borderRadius: 9, fontFamily: font, fontWeight: 700, fontSize: 13, cursor: "pointer",
+              style={{ flex: 1, padding: "9px 2px", borderRadius: 9, fontFamily: font, fontWeight: 700, fontSize: 12, cursor: "pointer",
                 border: `1px solid ${mobileTab === k ? C.accent : C.border}`,
                 background: mobileTab === k ? C.accent : "transparent",
                 color: mobileTab === k ? C.accentInk : C.muted }}>
@@ -966,7 +1162,7 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
       )}
 
       <main style={{
-        display: isPhone && mobileTab === "activity" ? "none" : "grid",
+        display: isPhone && (mobileTab === "activity" || mobileTab === "habits") ? "none" : "grid",
         gap: 20, padding: 20, maxWidth: 1200, margin: "0 auto",
         gridTemplateColumns: "minmax(300px, 380px) 1fr",
       }}>
@@ -1165,21 +1361,48 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
         </section>
       </main>
 
-      {/* ===== heatmap band (also the Activity tab on phone) ===== */}
+      {/* ===== habits band (also the Habits tab on phone) ===== */}
+      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 20px 20px",
+        ...(isPhone ? { display: mobileTab === "habits" ? "block" : "none", paddingTop: 20 } : {}) }}>
+        <HabitsToday C={C} font={font} display={display} habits={habits} log={habitLog}
+          dateKey={habitDate} onShift={shiftHabitDate} onToggle={toggleHabit}
+          onManage={() => setShowHabitManager(true)} compact={isNarrow} />
+      </div>
+
+      {/* ===== activity band (also the Activity tab on phone) ===== */}
       <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 20px 28px",
         ...(isPhone ? { display: mobileTab === "activity" ? "block" : "none", paddingTop: 20 } : {}) }}>
         <section style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 22 }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
             <div style={{ fontFamily: display, fontWeight: 700, fontSize: 15 }}>Activity</div>
+            <div style={{ display: "flex", gap: 4 }}>
+              {[["focus", "Focus"], ["habits", "Habits"]].map(([k, label]) => (
+                <button key={k} onClick={() => setActivityView(k)}
+                  style={{ ...iconBtn, fontWeight: 600,
+                    border: `1px solid ${activityView === k ? C.accent : C.border}`,
+                    background: activityView === k ? C.accent : "transparent",
+                    color: activityView === k ? C.accentInk : C.muted }}>{label}</button>
+              ))}
+            </div>
+            <div style={{ flex: 1 }} />
             <div style={{ fontSize: 12, color: C.muted }}>
-              a square per day — darker green = more pomodoros and tasks finished. The point is to keep the grid alive.
+              {activityView === "focus"
+                ? "a square per day — darker green = more pomodoros and tasks finished"
+                : `⚑ ${habitStreak.current}d habit streak · best ${habitStreak.best}`}
             </div>
           </div>
-          <Heatmap C={C} completions={completions} />
-          {isPhone && (
-            <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 20, paddingTop: 18 }}>
-              <StatsView C={C} sessions={sessions} nodeById={nodeById} streak={streak} />
-            </div>
+
+          {activityView === "focus" ? (
+            <>
+              <Heatmap C={C} completions={completions} />
+              {isPhone && (
+                <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 20, paddingTop: 18 }}>
+                  <StatsView C={C} sessions={sessions} nodeById={nodeById} streak={streak} />
+                </div>
+              )}
+            </>
+          ) : (
+            <HabitAnalytics C={C} font={font} display={display} habits={habits} log={habitLog} isPhone={isPhone} />
           )}
         </section>
       </div>
@@ -1312,6 +1535,16 @@ function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSignOut, o
       {showStats && (
         <Modal C={C} title="Focus stats" onClose={() => setShowStats(false)}>
           <StatsView C={C} sessions={sessions} nodeById={nodeById} streak={streak} />
+        </Modal>
+      )}
+
+      {showHabitManager && (
+        <Modal C={C} title="Edit habits" onClose={() => setShowHabitManager(false)}>
+          <HabitManager C={C} font={font} habits={habits}
+            onChange={(next) => { snapshot("habits"); setHabits(next); }}
+            onLoadDemo={loadDemoHabits} onClearHistory={clearHabitHistory}
+            hasHistory={Object.keys(habitLog).length > 0}
+            allowDemo={!userId} isDemo={demoHabits} />
         </Modal>
       )}
 
@@ -1861,6 +2094,349 @@ function StatsView({ C, sessions, nodeById, streak }) {
       <div style={{ marginTop: 18, fontSize: 13, color: C.muted }}>
         Streak: <b style={{ color: C.amber }}>{streak.current} days</b> · best {streak.best}.
         A streak survives on one pomodoro or one checked-off item — small counts.
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   Habits
+   ============================================================ */
+
+function HabitsToday({ C, font, display, habits, log, dateKey, onShift, onToggle, onManage, compact }) {
+  const live = habits.filter((h) => h.active).sort((a, b) => a.order - b.order);
+  // No grid on phone, so the stepper is how you reach an earlier day there.
+  const target = compact ? dateKey : todayKey();
+  const done = dayCount(log, target, live.map((h) => h.id));
+  const pct = live.length ? Math.round((100 * done) / live.length) : 0;
+  const isToday = target === todayKey();
+  const weeks = threeWeeks();
+  const today = todayKey();
+
+  const stepBtn = { fontFamily: font, fontSize: 13, fontWeight: 600, cursor: "pointer", padding: "4px 10px",
+    borderRadius: 8, border: `1px solid ${C.border}`, background: C.surface, color: C.ink };
+  const weekendBg = C.bg === "#101820" ? "#141D26" : "#F4F7F9";
+
+  const row = (cells) => (
+    <div style={{ display: "grid", gridTemplateColumns: "132px repeat(3, 1fr)", gap: 14, alignItems: "center" }}>
+      {cells}
+    </div>
+  );
+
+  return (
+    <section style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: compact ? 16 : 22 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+        <div style={{ fontFamily: display, fontWeight: 700, fontSize: 15 }}>Habits</div>
+        {compact && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <button style={stepBtn} onClick={() => onShift(-1)} aria-label="Previous day">‹</button>
+            <div style={{ fontSize: 12, color: C.muted, minWidth: 88, textAlign: "center" }}>
+              {isToday ? "Today" : dateKey}
+            </div>
+            <button style={{ ...stepBtn, opacity: isToday ? 0.4 : 1 }} disabled={isToday}
+              onClick={() => onShift(1)} aria-label="Next day">›</button>
+          </div>
+        )}
+        <div style={{ flex: 1 }} />
+        <div style={{ fontSize: 12, color: C.muted }}>{done} of {live.length} · {pct}%</div>
+        <button style={{ ...stepBtn, fontSize: 12, color: C.muted }} onClick={onManage}>Edit habits</button>
+      </div>
+
+      {!live.length ? (
+        <div style={{ fontSize: 13, color: C.muted, padding: "10px 0" }}>
+          No habits yet. Add your first one with “Edit habits”.
+        </div>
+      ) : (
+        <div>
+          {!compact && row([
+            <div key="sp" />,
+            ...weeks.map((wk, wi) => (
+              <div key={wi} style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3 }}>
+                {WD.map((d, di) => (
+                  <div key={di} style={{ fontSize: 10, color: C.muted, textAlign: "center" }}>{d}</div>
+                ))}
+              </div>
+            )),
+          ])}
+
+          {live.map((h) => {
+            const on = doneOn(log, target, h.id);
+            const name = (
+              <div key="n" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                <button onClick={() => onToggle(h.id, target)}
+                  aria-label={on ? `Mark ${h.name} not done` : `Mark ${h.name} done`} aria-pressed={on}
+                  style={{ width: 19, height: 19, borderRadius: "50%", flexShrink: 0, padding: 0, cursor: "pointer",
+                    display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1, fontSize: 11,
+                    border: `1.5px solid ${on ? C.accent : C.border}`,
+                    background: on ? C.accent : "transparent", color: C.accentInk }}>{on ? "✓" : ""}</button>
+                <span style={{ fontSize: 15, flexShrink: 0 }}>{h.icon}</span>
+                <span style={{ flex: 1, minWidth: 0, fontSize: 14, fontWeight: 500,
+                  textDecoration: on ? "line-through" : "none", color: on ? C.muted : C.ink,
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{h.name}</span>
+              </div>
+            );
+
+            if (compact) {
+              return <div key={h.id} style={{ padding: "9px 0", borderTop: `1px solid ${C.border}` }}>{name}</div>;
+            }
+
+            return (
+              <div key={h.id} style={{ padding: "5px 0", borderTop: `1px solid ${C.border}` }}>
+                {row([
+                  name,
+                  ...weeks.map((wk, wi) => (
+                    <div key={wi} style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3 }}>
+                      {wk.map((k, di) => {
+                        const future = k > today;
+                        const cellOn = !future && doneOn(log, k, h.id);
+                        return (
+                          <button key={k} disabled={future} onClick={() => onToggle(h.id, k)}
+                            title={`${h.name} · ${k}`} aria-label={`${h.name} on ${k}`} aria-pressed={cellOn}
+                            style={{ width: "100%", maxWidth: 30, aspectRatio: "1 / 1", justifySelf: "center",
+                              borderRadius: "50%", padding: 0, fontFamily: font, fontSize: 10,
+                              display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1,
+                              cursor: future ? "default" : "pointer",
+                              border: future ? `1px dashed ${C.border}` : `1px solid ${cellOn ? C.accent : C.border}`,
+                              background: cellOn ? C.accent : di >= 5 ? weekendBg : "transparent",
+                              color: future ? "transparent" : cellOn ? C.accentInk : C.muted,
+                              opacity: future ? 0.45 : 1,
+                              boxShadow: k === today ? `0 0 0 1.5px ${C.accent}` : "none" }}>
+                            {k.slice(8).replace(/^0/, "")}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )),
+                ])}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function WeekdayStrip({ C, wd, size = 14 }) {
+  return (
+    <div style={{ display: "flex", gap: 2 }}>
+      {wd.map((v, i) => (
+        <div key={i} title={`${WD_FULL[i]} · ${Math.round(v * 100)}%`}
+          style={{ width: size, height: size, borderRadius: 3, background: C.accent, opacity: 0.14 + v * 0.8 }} />
+      ))}
+    </div>
+  );
+}
+
+function Momentum({ C, value }) {
+  if (value === null) return <span style={{ color: C.muted }}>—</span>;
+  const pts = Math.round(value * 100);
+  if (Math.abs(pts) < 5) return <span style={{ color: C.muted }}>steady</span>;
+  return <span style={{ color: pts > 0 ? C.accent : C.amber }}>{pts > 0 ? "↑" : "↓"} {Math.abs(pts)} pts</span>;
+}
+
+function HabitAnalytics({ C, font, display, habits, log, isPhone }) {
+  const s = habitStats(habits, log);
+  if (!s.rows.length) return <div style={{ fontSize: 13, color: C.muted }}>No habits yet.</div>;
+  if (s.span < 3) {
+    return <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.6 }}>
+      Not enough history yet — check a few days off and this fills in. You can also load a demo history from “Edit habits”.
+    </div>;
+  }
+
+  const card = { background: C.bg, borderRadius: 10, padding: "12px 14px" };
+  const label = { fontSize: 12, color: C.muted, marginBottom: 4 };
+  const value = { fontSize: 16, fontWeight: 600 };
+  const pctOf = (r) => Math.round(r.rate * 100);
+  const atRisk = s.rows.filter((r) => r.atRisk);
+
+  const cards = (
+    <div style={{ display: "grid", gridTemplateColumns: isPhone ? "1fr" : "repeat(3, 1fr)", gap: 12, marginBottom: 18 }}>
+      <div style={card}>
+        <div style={label}>Most consistent</div>
+        <div style={value}>{s.best.habit.icon} {s.best.habit.name} · {pctOf(s.best)}%</div>
+      </div>
+      {s.worst && (
+        <div style={card}>
+          <div style={label}>Most missed</div>
+          <div style={value}>{s.worst.habit.icon} {s.worst.habit.name} · {pctOf(s.worst)}%</div>
+        </div>
+      )}
+      <div style={card}>
+        <div style={label}>Longest streak</div>
+        <div style={value}>{s.longest.best} {s.longest.best === 1 ? "day" : "days"} · {s.longest.habit.name}</div>
+      </div>
+    </div>
+  );
+
+  const prose = (
+    <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.7, marginBottom: 18 }}>
+      {s.spread >= 0.08
+        ? <>Across every habit you're strongest on <strong style={{ color: C.ink }}>{WD_FULL[s.bestDay]}s</strong> and
+          weakest on <strong style={{ color: C.ink }}>{WD_FULL[s.worstDay]}s</strong>.</>
+        : <>Your completion is even across the week — no weekday stands out.</>}
+      {atRisk.length > 0 && (
+        <> {atRisk.map((r) => r.habit.name).join(" and ")} {atRisk.length > 1 ? "have" : "has"} slipped
+          noticeably in the last 30 days.</>
+      )}
+    </div>
+  );
+
+  if (isPhone) {
+    return (
+      <div>
+        {cards}{prose}
+        {s.ranked.map((r) => (
+          <div key={r.habit.id} style={{ padding: "12px 0", borderTop: `1px solid ${C.border}` }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <span style={{ fontSize: 14 }}>{r.habit.icon}</span>
+              <span style={{ flex: 1, minWidth: 0, fontSize: 14, fontWeight: 500, overflow: "hidden",
+                textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.habit.name}</span>
+              {r.atRisk && <span style={{ fontSize: 11, color: C.amber, border: `1px solid ${C.amber}`,
+                borderRadius: 5, padding: "1px 6px" }}>at risk</span>}
+              <span style={{ fontSize: 13, fontWeight: 600 }}>{pctOf(r)}%</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: C.muted }}>
+              <span>{r.streak}d streak</span>
+              <span>best {r.best}d</span>
+              <Momentum C={C} value={r.momentum} />
+              <div style={{ flex: 1 }} />
+              <WeekdayStrip C={C} wd={r.wd} size={12} />
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  const th = { textAlign: "left", fontSize: 11, fontWeight: 600, color: C.muted, padding: "0 10px 8px 0" };
+  const td = { padding: "10px 10px 10px 0", fontSize: 13, borderTop: `1px solid ${C.border}` };
+
+  return (
+    <div>
+      {cards}{prose}
+      <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: font }}>
+        <thead>
+          <tr>
+            <th style={th}>Habit</th><th style={th}>90-day rate</th><th style={th}>Streak</th>
+            <th style={th}>Best</th><th style={th}>Last done</th><th style={th}>30d vs prior</th>
+            <th style={{ ...th, paddingRight: 0 }}>By weekday (Mon–Sun)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {s.ranked.map((r) => (
+            <tr key={r.habit.id}>
+              <td style={td}>
+                <span style={{ marginRight: 7 }}>{r.habit.icon}</span>{r.habit.name}
+                {r.atRisk && <span style={{ marginLeft: 8, fontSize: 11, color: C.amber,
+                  border: `1px solid ${C.amber}`, borderRadius: 5, padding: "1px 6px" }}>at risk</span>}
+              </td>
+              <td style={td}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ width: 70, height: 5, borderRadius: 3, background: C.ringTrack, overflow: "hidden" }}>
+                    <div style={{ width: `${pctOf(r)}%`, height: "100%", background: C.accent }} />
+                  </div>
+                  <span style={{ color: C.muted }}>{pctOf(r)}%</span>
+                </div>
+              </td>
+              <td style={td}>{r.streak}d</td>
+              <td style={{ ...td, color: C.muted }}>{r.best}d</td>
+              <td style={{ ...td, color: C.muted }}>{sinceLabel(r.lastKey)}</td>
+              <td style={td}><Momentum C={C} value={r.momentum} /></td>
+              <td style={{ ...td, paddingRight: 0 }}><WeekdayStrip C={C} wd={r.wd} /></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div style={{ fontSize: 12, color: C.muted, marginTop: 12 }}>
+        Weekday cells run Monday to Sunday — darker means you complete it more often that day.
+      </div>
+    </div>
+  );
+}
+
+function HabitManager({ C, font, habits, onChange, onLoadDemo, onClearHistory, hasHistory, allowDemo, isDemo }) {
+  const [draft, setDraft] = useState("");
+  const [confirmClear, setConfirmClear] = useState(false);
+  const live = habits.filter((h) => h.active).sort((a, b) => a.order - b.order);
+  const small = { fontFamily: font, fontSize: 12, fontWeight: 600, cursor: "pointer", padding: "4px 8px",
+    borderRadius: 6, border: `1px solid ${C.border}`, background: C.surface, color: C.muted };
+  const field = { padding: "7px 9px", borderRadius: 8, border: `1px solid ${C.border}`,
+    background: C.bg, color: C.ink, fontFamily: font, fontSize: 13 };
+
+  const add = () => {
+    const name = draft.trim();
+    if (!name) return;
+    onChange([...habits, { id: `hb-${Date.now().toString(36)}`, name, icon: "✅",
+      order: live.length, active: true, createdAt: todayKey() }]);
+    setDraft("");
+  };
+  const patch = (id, p) => onChange(habits.map((h) => (h.id === id ? { ...h, ...p } : h)));
+  const swap = (id, dir) => {
+    const i = live.findIndex((h) => h.id === id);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= live.length) return;
+    const a = live[i], b = live[j];
+    onChange(habits.map((h) =>
+      h.id === a.id ? { ...h, order: b.order } : h.id === b.id ? { ...h, order: a.order } : h));
+  };
+
+  return (
+    <div>
+      {live.map((h, i) => (
+        <div key={h.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0",
+          borderBottom: `1px solid ${C.border}` }}>
+          <input value={h.icon} onChange={(e) => patch(h.id, { icon: e.target.value.slice(0, 2) })}
+            aria-label={`Icon for ${h.name}`} style={{ ...field, width: 42, textAlign: "center" }} />
+          <input value={h.name} onChange={(e) => patch(h.id, { name: e.target.value })}
+            aria-label="Habit name" style={{ ...field, flex: 1, minWidth: 0 }} />
+          <button style={small} onClick={() => swap(h.id, -1)} disabled={i === 0} aria-label="Move up">↑</button>
+          <button style={small} onClick={() => swap(h.id, 1)} disabled={i === live.length - 1} aria-label="Move down">↓</button>
+          <button style={{ ...small, color: C.danger }}
+            onClick={() => patch(h.id, { active: false })}>Retire</button>
+        </div>
+      ))}
+      <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+        <input value={draft} onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") add(); }}
+          placeholder="New habit" style={{ ...field, flex: 1 }} />
+        <button onClick={add} style={{ ...small, background: C.accent, color: C.accentInk,
+          borderColor: C.accent, fontSize: 13, padding: "7px 14px" }}>Add</button>
+      </div>
+      <div style={{ fontSize: 12, color: C.muted, marginTop: 12, lineHeight: 1.6 }}>
+        Retiring a habit hides it from today's list but keeps every past check in the history.
+      </div>
+      <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 18, paddingTop: 16 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+          Demo data{isDemo && <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, color: C.amber,
+            border: `1px solid ${C.amber}`, borderRadius: 5, padding: "1px 6px" }}>active</span>}
+        </div>
+        {!allowDemo ? (
+          <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.6 }}>
+            Off while you're signed in — demo history would sync to your other devices and overwrite
+            real data. Sign out and choose “use without an account” to try it.
+          </div>
+        ) : (<>
+        <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.6, marginBottom: 10 }}>
+          Fills 120 days of invented history for the habits above, so the analytics have something to
+          show. This replaces your real habit history — ⌘Z undoes it. Demo history stays on this
+          device and is dropped if you later sign in.
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button style={{ ...small, fontSize: 13, padding: "7px 12px" }} onClick={onLoadDemo}>Load demo history</button>
+          {hasHistory && (confirmClear ? (
+            <>
+              <button style={{ ...small, fontSize: 13, padding: "7px 12px", color: C.danger, borderColor: C.danger }}
+                onClick={() => { onClearHistory(); setConfirmClear(false); }}>Yes, clear everything</button>
+              <button style={{ ...small, fontSize: 13, padding: "7px 12px" }}
+                onClick={() => setConfirmClear(false)}>Cancel</button>
+            </>
+          ) : (
+            <button style={{ ...small, fontSize: 13, padding: "7px 12px", color: C.danger }}
+              onClick={() => setConfirmClear(true)}>Clear all history</button>
+          ))}
+        </div>
+        </>)}
       </div>
     </div>
   );
