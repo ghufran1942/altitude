@@ -15,6 +15,7 @@ import { addReset, removeReset } from "./lib/since.js";
 import { HabitsToday } from "./components/habits/HabitsToday.jsx";
 import { SinceManager } from "./components/since/SinceManager.jsx";
 import { SinceTracker } from "./components/since/SinceTracker.jsx";
+import { BudgetView } from "./components/budget/BudgetView.jsx";
 import { DEFAULT_SETTINGS, INDENT, QUOTES } from "./lib/constants.js";
 import { daysAgoKey, deadlineState, fmtDeadline, shiftKey, todayKey } from "./lib/dates.js";
 import { demoHabitLog, seedHabits, streakFrom } from "./lib/habits.js";
@@ -130,7 +131,7 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
   // mobile layout
   const [isPhone, setIsPhone] = useState(false);
   const [isNarrow, setIsNarrow] = useState(false);
-  const [mobileTab, setMobileTab] = useState("pomodoro"); // pomodoro | track | activity | goals
+  const [mobileTab, setMobileTab] = useState("focus"); // focus | track | activity | goals | budget
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
 
   const [habitDate, setHabitDate] = useState(todayKey()); // which day the habit list edits
@@ -902,9 +903,11 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
       {isPhone && (
         <div style={{ display: "flex", gap: 6, padding: "10px 16px", background: C.surface,
           borderBottom: `1px solid ${C.border}`, position: "sticky", top: 57, zIndex: 25 }}>
-          {[["pomodoro", "Pomodoro"], ["track", "Track"], ["activity", "Activity"], ["goals", "Goals"]].map(([k, label]) => (
+          {[["focus", "Focus"], ["track", "Track"], ["activity", "Activity"], ["goals", "Goals"],
+            ["budget", "Budget"]].map(([k, label]) => (
             <button key={k} onClick={() => setMobileTab(k)}
-              style={{ flex: 1, padding: "9px 2px", borderRadius: 9, fontFamily: font, fontWeight: 700, fontSize: 12, cursor: "pointer",
+              style={{ flex: 1, padding: "9px 2px", borderRadius: 9, fontFamily: font, fontWeight: 700,
+                fontSize: 11, cursor: "pointer",
                 border: `1px solid ${mobileTab === k ? C.accent : C.border}`,
                 background: mobileTab === k ? C.accent : "transparent",
                 color: mobileTab === k ? C.accentInk : C.muted }}>
@@ -915,7 +918,7 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
       )}
 
       <main style={{
-        display: isPhone && (mobileTab === "activity" || mobileTab === "track") ? "none" : "grid",
+        display: isPhone && mobileTab !== "focus" && mobileTab !== "goals" ? "none" : "grid",
         gap: 20, padding: 20, maxWidth: 1200, margin: "0 auto",
         gridTemplateColumns: "minmax(300px, 380px) 1fr",
       }}>
@@ -928,7 +931,7 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
         <section className="timerPanel" style={{
           background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14,
           padding: 22, alignSelf: "start", position: "sticky", top: 78,
-          ...(isPhone ? { display: mobileTab === "pomodoro" ? "block" : "none" } : {}),
+          ...(isPhone ? { display: mobileTab === "focus" ? "block" : "none" } : {}),
         }}>
           <div style={{ display: "flex", gap: 6, marginBottom: 18 }}>
             {[["work", "Focus"], ["short", "Short break"], ["long", "Long break"]].map(([p, label]) => (
@@ -1177,6 +1180,15 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
             <HabitAnalytics C={C} font={font} display={display} habits={habits} log={habitLog} isPhone={isPhone} />
           )}
         </section>
+      </div>
+
+      {/* ===== budget band (local-only when signed out) ===== */}
+      <div style={{ maxWidth: 1200, margin: "0 auto",
+        paddingLeft: 20, paddingRight: 20, paddingBottom: 28, paddingTop: isPhone ? 20 : 0,
+        ...(isPhone ? { display: mobileTab === "budget" ? "block" : "none" } : {}) }}>
+        <BudgetView C={C} font={font} display={display} userId={userId}
+          isPhone={isPhone} isNarrow={isNarrow}
+          onToast={(msg, kind = "danger") => pushToast({ kind, title: msg })} />
       </div>
 
       {/* ===== modals ===== */}
