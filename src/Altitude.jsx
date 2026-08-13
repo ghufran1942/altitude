@@ -11,7 +11,11 @@ import { StatsView } from "./components/StatsView.jsx";
 import { DeadlineModal, MoveModal, ShrinkModal } from "./components/TaskModals.jsx";
 import { HabitAnalytics } from "./components/habits/HabitAnalytics.jsx";
 import { HabitManager } from "./components/habits/HabitManager.jsx";
+import { addReset, removeReset } from "./lib/since.js";
 import { HabitsToday } from "./components/habits/HabitsToday.jsx";
+import { SinceManager } from "./components/since/SinceManager.jsx";
+import { SinceTracker } from "./components/since/SinceTracker.jsx";
+import { BudgetView } from "./components/budget/BudgetView.jsx";
 import { DEFAULT_SETTINGS, INDENT, QUOTES } from "./lib/constants.js";
 import { daysAgoKey, deadlineState, fmtDeadline, shiftKey, todayKey } from "./lib/dates.js";
 import { demoHabitLog, seedHabits, streakFrom } from "./lib/habits.js";
@@ -82,6 +86,8 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
   const [habits, setHabits] = useState([]);
   const [habitLog, setHabitLog] = useState({}); // { "2026-03-10": { habitId: true } }
   const [demoHabits, setDemoHabits] = useState(false); // habitLog is invented, not real
+  const [sinceItems, setSinceItems] = useState([]);
+  const [sinceLog, setSinceLog] = useState({}); // { itemId: ["2026-07-01", ...] }
 
   const [focusId, setFocusId] = useState(null);
 
@@ -125,12 +131,15 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
   // mobile layout
   const [isPhone, setIsPhone] = useState(false);
   const [isNarrow, setIsNarrow] = useState(false);
-  const [mobileTab, setMobileTab] = useState("pomodoro"); // pomodoro | habits | activity | goals
+  const [mobileTab, setMobileTab] = useState("focus"); // focus | track | activity | goals | budget
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
 
   const [habitDate, setHabitDate] = useState(todayKey()); // which day the habit list edits
   const [activityView, setActivityView] = useState("focus"); // focus | habits
+  const [trackView, setTrackView] = useState("habits");        // habits | since
   const [showHabitManager, setShowHabitManager] = useState(false);
+  const [showSinceManager, setShowSinceManager] = useState(false);
+  const [armedReset, setArmedReset] = useState(null); // reset is two-step: arm, then confirm
 
   const distractRef = useRef(null);
   const addRef = useRef(null);
@@ -155,13 +164,15 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
     setHabits(s?.habits?.length ? s.habits : seedHabits());
     setHabitLog(s?.habitLog || {});
     setDemoHabits(!!s?.demoHabits);
+    setSinceItems(s?.sinceItems || []);
+    setSinceLog(s?.sinceLog || {});
     setDark(!!s?.dark);
     setRemaining((s?.settings?.work || DEFAULT_SETTINGS.work) * 60);
   }, []);
 
   const serialize = useCallback(
     () => ({ nodes, sessions, completions, distractions, settings, activeTaskId, reminded, dark, habits, habitLog, demoHabits }),
-    [nodes, sessions, completions, distractions, settings, activeTaskId, reminded, dark, habits, habitLog, demoHabits]
+    [nodes, sessions, completions, distractions, settings, activeTaskId, reminded, dark, habits, habitLog, demoHabits, sinceItems, sinceLog]
   );
 
   /* ---------- load: prefer cloud, fall back to local ---------- */
@@ -196,7 +207,7 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
       if (userId) saveCloud(userId, s);
     }, 500);
     return () => clearTimeout(saveTimer.current);
-  }, [nodes, sessions, completions, distractions, settings, activeTaskId, reminded, dark, habits, habitLog, demoHabits, loaded, userId, serialize]);
+  }, [nodes, sessions, completions, distractions, settings, activeTaskId, reminded, dark, habits, habitLog, demoHabits, sinceItems, sinceLog, loaded, userId, serialize]);
   /* ---------- realtime: apply edits made on other devices ---------- */
   useEffect(() => {
     if (!userId) return;
@@ -348,32 +359,36 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
   // state, so they deliberately don't land on the stack.
   const snapshot = useCallback(
     (label) => {
-      setUndoStack((s) => [...s.slice(-49), { nodes, completions, habits, habitLog, demoHabits, label }]);
+      setUndoStack((s) => [...s.slice(-49), { nodes, completions, habits, habitLog, demoHabits, sinceItems, sinceLog, label }]);
       setRedoStack([]);
     },
-    [nodes, completions, habits, habitLog, demoHabits]
+    [nodes, completions, habits, habitLog, demoHabits, sinceItems, sinceLog]
   );
   function undo() {
     if (!undoStack.length) return;
     const prev = undoStack[undoStack.length - 1];
-    setRedoStack((r) => [...r, { nodes, completions, habits, habitLog, demoHabits, label: prev.label }]);
+    setRedoStack((r) => [...r, { nodes, completions, habits, habitLog, demoHabits, sinceItems, sinceLog, label: prev.label }]);
     setNodes(prev.nodes);
     setCompletions(prev.completions);
     setHabits(prev.habits);
     setHabitLog(prev.habitLog);
     setDemoHabits(!!prev.demoHabits);
+    setSinceItems(prev.sinceItems || []);
+    setSinceLog(prev.sinceLog || {});
     setUndoStack((s) => s.slice(0, -1));
     setEditingId(null);
   }
   function redo() {
     if (!redoStack.length) return;
     const next = redoStack[redoStack.length - 1];
-    setUndoStack((s) => [...s.slice(-49), { nodes, completions, habits, habitLog, demoHabits, label: next.label }]);
+    setUndoStack((s) => [...s.slice(-49), { nodes, completions, habits, habitLog, demoHabits, sinceItems, sinceLog, label: next.label }]);
     setNodes(next.nodes);
     setCompletions(next.completions);
     setHabits(next.habits);
     setHabitLog(next.habitLog);
     setDemoHabits(!!next.demoHabits);
+    setSinceItems(next.sinceItems || []);
+    setSinceLog(next.sinceLog || {});
     setRedoStack((r) => r.slice(0, -1));
     setEditingId(null);
   }
@@ -631,6 +646,16 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
     setHabitLog(demoHabitLog(habits));
     setDemoHabits(true);
   }
+  function resetSince(id, dateKey) {
+    snapshot("reset counter");
+    setSinceLog((log) => addReset(log, id, dateKey));
+    setArmedReset(null);
+  }
+  function removeSinceReset(id, dateKey) {
+    snapshot("remove reset");
+    setSinceLog((log) => removeReset(log, id, dateKey));
+  }
+
   function clearHabitHistory() {
     snapshot("clear habits");
     setHabitLog({});
@@ -780,6 +805,19 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
 
   // The header action buttons — inline on desktop, stacked in the hamburger on phone.
   const closeMenu = () => setHeaderMenuOpen(false);
+  // one control, rendered inside whichever panel is showing
+  const trackSwitch = (
+    <div style={{ display: "flex", gap: 4 }}>
+      {[["habits", "Habits"], ["since", "Since"]].map(([k, label]) => (
+        <button key={k} onClick={() => { setTrackView(k); setArmedReset(null); }}
+          style={{ ...iconBtn, fontWeight: 600,
+            border: `1px solid ${trackView === k ? C.accent : C.border}`,
+            background: trackView === k ? C.accent : "transparent",
+            color: trackView === k ? C.accentInk : C.muted }}>{label}</button>
+      ))}
+    </div>
+  );
+
   const headerActions = (
     <>
       <button style={{ ...iconBtn, ...(overdueCount ? { borderColor: C.danger, color: C.danger } : soonCount ? { borderColor: C.amber, color: C.amber } : {}) }}
@@ -865,9 +903,11 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
       {isPhone && (
         <div style={{ display: "flex", gap: 6, padding: "10px 16px", background: C.surface,
           borderBottom: `1px solid ${C.border}`, position: "sticky", top: 57, zIndex: 25 }}>
-          {[["pomodoro", "Pomodoro"], ["habits", "Habits"], ["activity", "Activity"], ["goals", "Goals"]].map(([k, label]) => (
+          {[["focus", "Focus"], ["track", "Track"], ["activity", "Activity"], ["goals", "Goals"],
+            ["budget", "Budget"]].map(([k, label]) => (
             <button key={k} onClick={() => setMobileTab(k)}
-              style={{ flex: 1, padding: "9px 2px", borderRadius: 9, fontFamily: font, fontWeight: 700, fontSize: 12, cursor: "pointer",
+              style={{ flex: 1, padding: "9px 2px", borderRadius: 9, fontFamily: font, fontWeight: 700,
+                fontSize: 11, cursor: "pointer",
                 border: `1px solid ${mobileTab === k ? C.accent : C.border}`,
                 background: mobileTab === k ? C.accent : "transparent",
                 color: mobileTab === k ? C.accentInk : C.muted }}>
@@ -878,7 +918,7 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
       )}
 
       <main style={{
-        display: isPhone && (mobileTab === "activity" || mobileTab === "habits") ? "none" : "grid",
+        display: isPhone && mobileTab !== "focus" && mobileTab !== "goals" ? "none" : "grid",
         gap: 20, padding: 20, maxWidth: 1200, margin: "0 auto",
         gridTemplateColumns: "minmax(300px, 380px) 1fr",
       }}>
@@ -891,7 +931,7 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
         <section className="timerPanel" style={{
           background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14,
           padding: 22, alignSelf: "start", position: "sticky", top: 78,
-          ...(isPhone ? { display: mobileTab === "pomodoro" ? "block" : "none" } : {}),
+          ...(isPhone ? { display: mobileTab === "focus" ? "block" : "none" } : {}),
         }}>
           <div style={{ display: "flex", gap: 6, marginBottom: 18 }}>
             {[["work", "Focus"], ["short", "Short break"], ["long", "Long break"]].map(([p, label]) => (
@@ -1077,12 +1117,31 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
         </section>
       </main>
 
-      {/* ===== habits band (also the Habits tab on phone) ===== */}
+      {/* ===== track band (also the Track tab on phone) ===== */}
       <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 20px 20px",
-        ...(isPhone ? { display: mobileTab === "habits" ? "block" : "none", paddingTop: 20 } : {}) }}>
-        <HabitsToday C={C} font={font} display={display} habits={habits} log={habitLog}
-          dateKey={habitDate} onShift={shiftHabitDate} onToggle={toggleHabit}
-          onManage={() => setShowHabitManager(true)} compact={isNarrow} />
+        ...(isPhone ? { display: mobileTab === "track" ? "block" : "none", paddingTop: 20 } : {}) }}>
+        {trackView === "habits" ? (
+          <HabitsToday C={C} font={font} display={display} habits={habits} log={habitLog}
+            dateKey={habitDate} onShift={shiftHabitDate} onToggle={toggleHabit}
+            onManage={() => setShowHabitManager(true)} compact={isNarrow}
+            viewSwitch={trackSwitch} />
+        ) : (
+          <section style={{ background: C.surface, border: `1px solid ${C.border}`,
+            borderRadius: 14, padding: isNarrow ? 16 : 22 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+              <div style={{ fontFamily: display, fontWeight: 700, fontSize: 15 }}>Track</div>
+              {trackSwitch}
+              <div style={{ flex: 1 }} />
+              <button style={{ fontFamily: font, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                padding: "4px 10px", borderRadius: 8, border: `1px solid ${C.border}`,
+                background: C.surface, color: C.muted }}
+                onClick={() => setShowSinceManager(true)}>Edit trackers</button>
+            </div>
+            <SinceTracker C={C} font={font} display={display} items={sinceItems} log={sinceLog}
+              onReset={resetSince} onManage={() => setShowSinceManager(true)} compact={isNarrow}
+              armedId={armedReset} onArm={setArmedReset} onCancelArm={() => setArmedReset(null)} />
+          </section>
+        )}
       </div>
 
       {/* ===== activity band (also the Activity tab on phone) ===== */}
@@ -1121,6 +1180,15 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
             <HabitAnalytics C={C} font={font} display={display} habits={habits} log={habitLog} isPhone={isPhone} />
           )}
         </section>
+      </div>
+
+      {/* ===== budget band (local-only when signed out) ===== */}
+      <div style={{ maxWidth: 1200, margin: "0 auto",
+        paddingLeft: 20, paddingRight: 20, paddingBottom: 28, paddingTop: isPhone ? 20 : 0,
+        ...(isPhone ? { display: mobileTab === "budget" ? "block" : "none" } : {}) }}>
+        <BudgetView C={C} font={font} display={display} userId={userId}
+          isPhone={isPhone} isNarrow={isNarrow}
+          onToast={(msg, kind = "danger") => pushToast({ kind, title: msg })} />
       </div>
 
       {/* ===== modals ===== */}
@@ -1261,6 +1329,14 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
             onLoadDemo={loadDemoHabits} onClearHistory={clearHabitHistory}
             hasHistory={Object.keys(habitLog).length > 0}
             allowDemo={!userId} isDemo={demoHabits} />
+        </Modal>
+      )}
+
+      {showSinceManager && (
+        <Modal C={C} title="Edit trackers" onClose={() => setShowSinceManager(false)}>
+          <SinceManager C={C} font={font} items={sinceItems} log={sinceLog}
+            onChange={(next) => { snapshot("trackers"); setSinceItems(next); }}
+            onAddReset={resetSince} onRemoveReset={removeSinceReset} />
         </Modal>
       )}
 

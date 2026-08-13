@@ -2,7 +2,7 @@ import React from "react";
 import { WD, threeWeeks, todayKey } from "../../lib/dates.js";
 import { dayCount, doneOn } from "../../lib/habits.js";
 
-export function HabitsToday({ C, font, display, habits, log, dateKey, onShift, onToggle, onManage, compact }) {
+export function HabitsToday({ C, font, display, habits, log, dateKey, onShift, onToggle, onManage, compact, viewSwitch }) {
   const live = habits.filter((h) => h.active).sort((a, b) => a.order - b.order);
   // No grid on phone, so the stepper is how you reach an earlier day there.
   const target = compact ? dateKey : todayKey();
@@ -25,7 +25,8 @@ export function HabitsToday({ C, font, display, habits, log, dateKey, onShift, o
   return (
     <section style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: compact ? 16 : 22 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
-        <div style={{ fontFamily: display, fontWeight: 700, fontSize: 15 }}>Habits</div>
+        <div style={{ fontFamily: display, fontWeight: 700, fontSize: 15 }}>{viewSwitch ? "Track" : "Habits"}</div>
+        {viewSwitch}
         {compact && (
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <button style={stepBtn} onClick={() => onShift(-1)} aria-label="Previous day">‹</button>
