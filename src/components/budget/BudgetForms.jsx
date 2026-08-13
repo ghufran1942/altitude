@@ -176,12 +176,52 @@ export function TransactionForm({ C, font, accounts, envelopes, initial, onSave,
 
 const KINDS = [["checking", "Checking"], ["savings", "Savings"], ["cash", "Cash"], ["credit", "Credit card"]];
 
-export function AccountManager({ C, font, accounts, balances, onCreate, onUpdate, onSetStarting }) {
+/**
+ * What the account held before its imported history starts. Held as a draft and
+ * written on blur — a half-typed figure would otherwise rewrite the opening
+ * balance on every keystroke.
+ */
+function OpeningInput({ C, font, account, cents, onCommit }) {
+  /* centsToInput drops the sign — right for the amount field, which has its own
+     ± toggle, but an opening balance is signed: a card starts owing money. */
+  const saved = cents ? `${cents < 0 ? "-" : ""}${centsToInput(cents)}` : "";
+  const [draft, setDraft] = useState(saved);
+  const [editing, setEditing] = useState(false);
+
+  const commit = () => {
+    setEditing(false);
+    const trimmed = draft.trim();
+    const next = trimmed ? (parseMoney(trimmed) ?? 0) : 0;
+    if (next === (cents || 0)) { setDraft(saved); return; }
+    onCommit(next);
+  };
+
+  return (
+    <input
+      value={editing ? draft : saved}
+      onFocus={() => { setDraft(saved); setEditing(true); }}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.target.blur();
+        if (e.key === "Escape") { setDraft(saved); setEditing(false); e.target.blur(); }
+      }}
+      placeholder="0.00"
+      inputMode="decimal"
+      aria-label={`Opening balance for ${account.name}`}
+      style={{ ...fieldStyle(C, font), width: 92, textAlign: "right" }}
+    />
+  );
+}
+
+export function AccountManager({ C, font, accounts, balances, openings, onCreate, onUpdate, onSetStarting, onClear }) {
   const [name, setName] = useState("");
   const [kind, setKind] = useState("checking");
   const [starting, setStarting] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  // Clearing a ledger is not undoable, so it takes a second, deliberate click.
+  const [confirmId, setConfirmId] = useState(null);
   const f = fieldStyle(C, font);
   const btn = smallBtn(C, font);
   const live = accounts.filter((a) => !a.archived);
@@ -200,6 +240,14 @@ export function AccountManager({ C, font, accounts, balances, onCreate, onUpdate
 
   return (
     <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, paddingBottom: 6,
+        fontSize: 11, color: C.muted }}>
+        <span style={{ flex: 1, minWidth: 0 }}>Account</span>
+        <span style={{ width: 78 }} />
+        {onSetStarting && <span style={{ width: 92, textAlign: "right" }}>Opening</span>}
+        <span style={{ width: 100, textAlign: "right" }}>Balance</span>
+        <span style={{ width: onClear ? 132 : 62 }} />
+      </div>
       {live.map((a) => {
         const bal = balances.get(a.id) || 0;
         const isCredit = a.kind === "credit";
@@ -211,9 +259,28 @@ export function AccountManager({ C, font, accounts, balances, onCreate, onUpdate
             <span style={{ fontSize: 11, color: C.muted, width: 78 }}>
               {KINDS.find(([k]) => k === a.kind)?.[1] || a.kind}
             </span>
+            {onSetStarting && (
+              <OpeningInput C={C} font={font} account={a} cents={openings?.get(a.id) || 0}
+                onCommit={(cents) => onSetStarting(a.id, cents)} />
+            )}
             <span style={{ fontSize: 13, fontWeight: 600, width: 100, textAlign: "right",
               fontVariantNumeric: "tabular-nums",
               color: bal < 0 ? (isCredit ? C.amber : C.danger) : C.ink }}>{money(bal)}</span>
+            {onClear && (
+              <button
+                style={{ ...btn, color: confirmId === a.id ? C.accentInk : C.muted,
+                  background: confirmId === a.id ? C.danger : "transparent",
+                  border: `1px solid ${confirmId === a.id ? C.danger : C.border}` }}
+                title="Delete every transaction on this account so it can be re-imported"
+                onClick={async () => {
+                  if (confirmId !== a.id) { setConfirmId(a.id); return; }
+                  setConfirmId(null);
+                  try { await onClear(a.id); } catch { /* surfaced by the caller's toast */ }
+                }}
+                onBlur={() => setConfirmId((c) => (c === a.id ? null : c))}>
+                {confirmId === a.id ? "Delete all rows?" : "Clear"}
+              </button>
+            )}
             <button style={{ ...btn, color: C.danger }}
               onClick={() => onUpdate(a.id, { archived: true })}>Archive</button>
           </div>

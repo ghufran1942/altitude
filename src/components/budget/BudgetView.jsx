@@ -3,7 +3,7 @@ import { Modal } from "../Modal.jsx";
 import { money, moneySigned } from "../../lib/budget/money.js";
 import {
   currentMonth, shiftMonth, monthLabel, monthSummary, envelopeSpending,
-  accountBalances, netWorth, indexMonthlyTotals, baselineFor,
+  accountBalances, netWorth, indexMonthlyTotals, baselineFor, startingAdjustment,
 } from "../../lib/budget/budget.js";
 import * as cloudStore from "../../lib/budget/budgetStore.js";
 import * as localStore from "../../lib/budget/localBudgetStore.js";
@@ -27,6 +27,7 @@ export function BudgetView({ C, font, display, userId, isPhone, isNarrow, onToas
   const [filterEnvelope, setFilterEnvelope] = useState("");
   const [paycheck, setPaycheck] = useState(null);
   const [duePay, setDuePay] = useState([]);
+  const [openings, setOpenings] = useState(new Map());
 
   /* Signed out there are no cloud tables to talk to, so fall back to the
      localStorage store. Identical API, so nothing below this line knows or
@@ -49,11 +50,13 @@ export function BudgetView({ C, font, display, userId, isPhone, isNarrow, onToas
   }, [store, userId]);
 
   const loadStatic = useCallback(async () => {
-    const [a, e, t, at, pc] = await Promise.all([
+    const [a, e, t, at, pc, st] = await Promise.all([
       store.listAccounts(userId), store.listEnvelopes(userId),
       store.monthlyTotals(userId), store.accountTotals(userId), store.getPaycheck(userId),
+      store.listStarting(userId),
     ]);
     setAccounts(a); setEnvelopes(e); setTotals(t); setAcctTotals(at); setPaycheck(pc);
+    setOpenings(new Map(st.map((r) => [r.account_id, r.amount_cents])));
     await refreshDue(pc);
     return { accounts: a, envelopes: e };
   }, [store, userId, refreshDue]);
@@ -109,6 +112,19 @@ export function BudgetView({ C, font, display, userId, isPhone, isNarrow, onToas
     const fake = accounts.map((a) => ({ ...a }));
     const rows = [...balances.entries()].map(([id, v]) => ({ account_id: id, amount_cents: v, kind: "normal" }));
     return netWorth(fake, rows);
+  }, [accounts, balances]);
+
+  /* Envelopes answer "where did it go"; these answer "what is left". Grouped
+     rather than listed flat, since a card balance is a debt and reads the
+     opposite way round to money in the bank. */
+  const accountGroups = useMemo(() => {
+    const cash = [], cards = [];
+    accounts.filter((a) => !a.archived).forEach((a) => {
+      const row = { id: a.id, name: a.name, balance: balances.get(a.id) || 0 };
+      (a.kind === "credit" ? cards : cash).push(row);
+    });
+    const total = (xs) => xs.reduce((s, x) => s + x.balance, 0);
+    return { cash, cards, cashTotal: total(cash), cardTotal: total(cards) };
   }, [accounts, balances]);
 
   const spendingByEnvelope = useMemo(
@@ -209,6 +225,65 @@ export function BudgetView({ C, font, display, userId, isPhone, isNarrow, onToas
     await refreshDue(paycheck);
     onToast?.(`Posted ${duePay.length} payday${duePay.length > 1 ? "s" : ""} · ` +
       `${inserted} deposit${inserted === 1 ? "" : "s"}.`, "accent");
+  });
+
+  /**
+   * Import the rows, then — if the export carried a running balance — reconcile
+   * the account to it by sizing its starting-balance row to whatever the
+   * imported history doesn't already account for. Rewrites the existing
+   * starting row rather than stacking a second one.
+   */
+  const importCsv = guard(async (rows, balance, accountId) => {
+    const res = await store.importTransactions(userId, rows);
+    if (!balance || !accountId) return res;
+
+    const through = await store.accountRowsThrough(userId, accountId, balance.date);
+    const target = startingAdjustment(accountId, balance.balance_cents, through);
+    const existing = through.find((t) => t.kind === "starting" && t.account_id === accountId);
+
+    if (existing) {
+      if (existing.amount_cents !== target) await store.updateTransaction(existing.id, { amount_cents: target });
+    } else if (target !== 0) {
+      const earliest = through.reduce((m, t) => (t.date < m ? t.date : m), balance.date);
+      await store.createTransaction(userId, {
+        account_id: accountId, date: earliest, amount_cents: target,
+        payee: "Starting balance", kind: "starting", envelope_id: null, cleared: true,
+      });
+    }
+    return { ...res, balanceSet: balance.balance_cents, startingCents: target };
+  });
+
+  /**
+   * Set what an account held before its imported history begins. Most bank
+   * exports carry no running balance, so without this an account shows only
+   * the movement in the file — a card that was already owed money in December
+   * reads far too healthy.
+   */
+  const setOpeningBalance = guard(async (accountId, cents) => {
+    const rows = await store.accountRowsThrough(userId, accountId, todayKey());
+    const mine = rows.filter((t) => t.account_id === accountId);
+    const existing = mine.find((t) => t.kind === "starting");
+    if (existing) {
+      if (existing.amount_cents !== cents) {
+        await store.updateTransaction(existing.id, { amount_cents: cents });
+      }
+    } else if (cents !== 0) {
+      // Date it before anything else on the account, so it counts towards any
+      // later balance reconciliation rather than sitting after it.
+      const earliest = mine.reduce((m, t) => (!m || t.date < m ? t.date : m), null);
+      await store.createTransaction(userId, {
+        account_id: accountId, date: earliest || `${month}-01`, amount_cents: cents,
+        payee: "Starting balance", kind: "starting", envelope_id: null, cleared: true,
+      });
+    }
+    await refresh();
+  });
+
+  const clearAccount = guard(async (accountId) => {
+    const n = await store.deleteAccountTransactions(userId, accountId);
+    setFilterEnvelope("");
+    await refresh();
+    onToast?.(`Deleted ${n} row${n === 1 ? "" : "s"} — that account is ready to re-import.`, "amber");
   });
 
   const runSeed = guard(async () => {
@@ -368,6 +443,35 @@ export function BudgetView({ C, font, display, userId, isPhone, isNarrow, onToas
         </div>
       )}
 
+      {/* what's actually in the accounts, before the month's spending breakdown */}
+      <div style={{ display: "grid", gap: 10, marginBottom: 18,
+        gridTemplateColumns: isPhone ? "1fr" : "1fr 1fr" }}>
+        {[["In the bank", accountGroups.cash, accountGroups.cashTotal, false],
+          ["On the cards", accountGroups.cards, accountGroups.cardTotal, true]]
+          .filter(([, list]) => list.length)
+          .map(([label, list, total, isCard]) => (
+            <div key={label} style={{ background: C.bg, borderRadius: 10, padding: "11px 13px" }}>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 7 }}>
+                <span style={{ fontSize: 11, color: C.muted }}>{label}</span>
+                <div style={{ flex: 1 }} />
+                <span style={{ fontSize: 16, fontWeight: 600, fontVariantNumeric: "tabular-nums",
+                  color: total < 0 ? (isCard ? C.amber : C.danger) : C.ink }}>{money(total)}</span>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "3px 12px" }}>
+                {list.map((a) => (
+                  <span key={a.id} style={{ fontSize: 11.5, color: C.muted }}>
+                    {a.name}{" "}
+                    <span style={{ fontVariantNumeric: "tabular-nums",
+                      color: a.balance < 0 ? (isCard ? C.amber : C.danger) : C.ink }}>
+                      {money(a.balance)}
+                    </span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+      </div>
+
       {/* envelopes */}
       <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>By envelope</div>
       {!envRows.length ? (
@@ -382,7 +486,9 @@ export function BudgetView({ C, font, display, userId, isPhone, isNarrow, onToas
             const limit = envelope.limit_cents ?? null;
             const base = limit ?? (envelope.id === "__unassigned" ? null
               : baselineFor(envelope.id, totalsIndex, month));
-            const pct = base ? Math.min(100, Math.round((100 * spent) / base)) : 0;
+            // Refunds can net an envelope below zero; a negative bar width is
+            // not a thing, so floor it.
+            const pct = base ? Math.min(100, Math.max(0, Math.round((100 * spent) / base))) : 0;
             const over = base != null && spent > base;
             const active = filterEnvelope === envelope.id;
             return (
@@ -460,7 +566,9 @@ export function BudgetView({ C, font, display, userId, isPhone, isNarrow, onToas
                 {!isPhone && (
                   <span style={{ fontSize: 12, color: C.muted, width: 150, flexShrink: 0,
                     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {isTransfer ? `→ ${acctName(t.transfer_account_id)}`
+                    {/* An imported transfer has no destination on it — the far
+                        side came from that account's own export. */}
+                    {isTransfer ? (t.transfer_account_id ? `→ ${acctName(t.transfer_account_id)}` : "transfer")
                       : isStarting ? "starting balance"
                       : env ? `${env.icon || ""} ${env.name}`
                       // Income has no envelope by design — envelopes track
@@ -499,7 +607,8 @@ export function BudgetView({ C, font, display, userId, isPhone, isNarrow, onToas
       {modal === "accounts" && (
         <Modal C={C} title="Accounts" onClose={() => setModal(null)}>
           <AccountManager C={C} font={font} accounts={accounts} balances={balances}
-            onCreate={addAccount} onUpdate={patchAccount} />
+            openings={openings} onCreate={addAccount} onUpdate={patchAccount}
+            onSetStarting={setOpeningBalance} onClear={clearAccount} />
         </Modal>
       )}
 
@@ -521,7 +630,7 @@ export function BudgetView({ C, font, display, userId, isPhone, isNarrow, onToas
         <Modal C={C} title="Import CSV" onClose={() => { setModal(null); refresh(); }}>
           <CsvImport C={C} font={font} accounts={accounts}
             onCheckDuplicates={(hashes) => store.existingHashes(userId, hashes)}
-            onImport={(rows) => store.importTransactions(userId, rows)}
+            onImport={importCsv}
             onClose={() => { setModal(null); refresh(); }} />
         </Modal>
       )}

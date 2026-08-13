@@ -1,6 +1,9 @@
 import React, { useState } from "react";
 import { money } from "../../lib/budget/money.js";
-import { parseCsv, guessColumns, rowsToDrafts, triageDrafts } from "../../lib/budget/budget.js";
+import {
+  parseCsv, guessColumns, rowsToDrafts, triageDrafts, balanceAnchor, looksUnsigned,
+  detectFlip, DEFAULT_TRANSFER_PATTERNS, parseTransferPatterns, matchesTransfer,
+} from "../../lib/budget/budget.js";
 import { fieldStyle, smallBtn } from "./BudgetForms.jsx";
 
 /**
@@ -14,8 +17,11 @@ export function CsvImport({ C, font, accounts, onCheckDuplicates, onImport, onCl
   const [mapping, setMapping] = useState(null);
   const [hasHeader, setHasHeader] = useState(true);
   const [flip, setFlip] = useState(false);
+  const [flipAuto, setFlipAuto] = useState(false);
   const [accountId, setAccountId] = useState(accounts.filter((a) => !a.archived)[0]?.id || "");
   const [drafts, setDrafts] = useState([]);
+  const [useBalance, setUseBalance] = useState(true);
+  const [transferText, setTransferText] = useState(DEFAULT_TRANSFER_PATTERNS);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
@@ -31,8 +37,16 @@ export function CsvImport({ C, font, accounts, onCheckDuplicates, onImport, onCl
       try {
         const parsed = parseCsv(String(reader.result || ""));
         if (parsed.length < 2) { setError("That file has no data rows."); return; }
+        const guess = guessColumns(parsed[0]);
+        /* Only let a direction column drive the sign when the amounts don't
+           carry one themselves — on a signed export it would turn refunds
+           filed under "DEBIT" into charges. */
+        if (!looksUnsigned(parsed.slice(1), guess.amount)) guess.direction = -1;
+        const autoFlip = detectFlip(parsed.slice(1), guess);
         setRows(parsed);
-        setMapping(guessColumns(parsed[0]));
+        setMapping(guess);
+        setFlip(autoFlip);
+        setFlipAuto(autoFlip);
         setStep("map");
       } catch {
         setError("Could not read that file.");
@@ -46,7 +60,8 @@ export function CsvImport({ C, font, accounts, onCheckDuplicates, onImport, onCl
     setBusy(true); setError(null);
     try {
       const body = hasHeader ? rows.slice(1) : rows;
-      const built = rowsToDrafts(body, mapping, accountId, { flip });
+      const built = rowsToDrafts(body, mapping, accountId,
+        { flip, transferPatterns: parseTransferPatterns(transferText) });
       const hashes = built.map((d) => d.import_hash).filter(Boolean);
       const existing = await onCheckDuplicates(hashes);
       setDrafts(triageDrafts(built, existing));
@@ -59,10 +74,17 @@ export function CsvImport({ C, font, accounts, onCheckDuplicates, onImport, onCl
 
   const commit = async () => {
     const picked = drafts.filter((d) => d.include && !d.problem);
-    if (!picked.length) { setError("Nothing selected."); return; }
+    // Re-importing a file you already loaded leaves nothing new to insert, but
+    // reconciling the balance off it is still worth doing on its own.
+    if (!picked.length && !(useBalance && anchor)) { setError("Nothing selected."); return; }
     setBusy(true); setError(null);
     try {
-      const res = await onImport(picked.map(({ rowIndex, problem, status, include, ...t }) => t));
+      // balance_cents is read off the file to reconcile the account; it is not
+      // a column on a transaction and must not travel with the insert.
+      const res = await onImport(
+        picked.map(({ rowIndex, problem, status, include, balance_cents, pending, ...t }) => t),
+        useBalance ? anchor : null,
+        accountId);
       setResult(res);
       setStep("done");
     } catch (e) {
@@ -76,9 +98,13 @@ export function CsvImport({ C, font, accounts, onCheckDuplicates, onImport, onCl
     new: drafts.filter((d) => d.status === "new").length,
     duplicate: drafts.filter((d) => d.status === "duplicate").length,
     repeat: drafts.filter((d) => d.status === "repeat").length,
+    pending: drafts.filter((d) => d.status === "pending").length,
     error: drafts.filter((d) => d.status === "error").length,
   };
   const selected = drafts.filter((d) => d.include && !d.problem).length;
+  const anchor = balanceAnchor(drafts);
+  const accountName = live.find((a) => a.id === accountId)?.name || "this account";
+  const canCommit = selected > 0 || (useBalance && !!anchor);
 
   /* ---------- step: file ---------- */
   if (step === "file") {
@@ -169,11 +195,39 @@ export function CsvImport({ C, font, accounts, onCheckDuplicates, onImport, onCl
           </div>
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
-          <input type="checkbox" checked={flip} id="flip" onChange={(e) => setFlip(e.target.checked)} />
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+          <div>
+            <span style={{ fontSize: 11, color: C.muted, marginBottom: 4, display: "block" }}>
+              Direction — for exports whose amounts have no sign
+            </span>
+            {pick("direction", true)}
+          </div>
+          <div>
+            <span style={{ fontSize: 11, color: C.muted, marginBottom: 4, display: "block" }}>
+              Status — to hold back pending rows
+            </span>
+            {pick("status", true)}
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 12 }}>
+          <span style={{ fontSize: 11, color: C.muted, marginBottom: 4, display: "block" }}>
+            Running balance — optional, used to set this account's opening balance
+          </span>
+          {pick("balance", true)}
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+          <input type="checkbox" checked={flip} id="flip"
+            onChange={(e) => { setFlip(e.target.checked); setFlipAuto(false); }} />
           <label htmlFor="flip" style={{ fontSize: 13, cursor: "pointer" }}>
             Flip signs — my export writes spending as positive
           </label>
+          {flipAuto && (
+            <span style={{ fontSize: 11, color: C.accent }}>
+              set automatically — this file's payment rows are negative
+            </span>
+          )}
         </div>
 
         <div style={{ background: C.bg, borderRadius: 8, padding: 12, marginBottom: 14 }}>
@@ -203,14 +257,34 @@ export function CsvImport({ C, font, accounts, onCheckDuplicates, onImport, onCl
 
   /* ---------- step: review ---------- */
   if (step === "review") {
-    const tint = { new: C.ink, duplicate: C.muted, repeat: C.muted, error: C.danger };
+    const tint = { new: C.ink, duplicate: C.muted, repeat: C.muted, pending: C.amber, error: C.danger };
+    /* Re-tagging transfers only changes `kind`, which no hash or duplicate
+       check depends on, so it can be reapplied without rebuilding the preview. */
+    const retag = (text) => {
+      setTransferText(text);
+      const pats = parseTransferPatterns(text);
+      setDrafts((xs) => xs.map((d) => (
+        { ...d, kind: matchesTransfer(d.payee, pats) ? "transfer" : "normal" })));
+    };
+    const transferCount = drafts.filter((d) => d.kind === "transfer").length;
+
     return (
       <div>
         <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 12, fontSize: 12 }}>
           <span><strong>{counts.new}</strong> new</span>
           {counts.duplicate > 0 && <span style={{ color: C.muted }}>{counts.duplicate} already imported</span>}
           {counts.repeat > 0 && <span style={{ color: C.muted }}>{counts.repeat} repeated in file</span>}
+          {counts.pending > 0 && <span style={{ color: C.amber }}>{counts.pending} pending — held back</span>}
           {counts.error > 0 && <span style={{ color: C.danger }}>{counts.error} unreadable</span>}
+        </div>
+
+        <div style={{ marginBottom: 12 }}>
+          <span style={{ fontSize: 11, color: C.muted, marginBottom: 4, display: "block" }}>
+            Treat as transfers, not income or spending — {transferCount} of {drafts.length} rows match
+          </span>
+          <input value={transferText} onChange={(e) => retag(e.target.value)}
+            aria-label="Transfer keywords" placeholder="comma-separated words"
+            style={{ ...f, fontSize: 12 }} />
         </div>
 
         <div style={{ maxHeight: 300, overflowY: "auto", border: `1px solid ${C.border}`,
@@ -231,21 +305,44 @@ export function CsvImport({ C, font, accounts, onCheckDuplicates, onImport, onCl
                 {d.problem && <span style={{ color: C.danger }}> · {d.problem}</span>}
                 {d.status === "duplicate" && <span style={{ color: C.muted }}> · already imported</span>}
                 {d.status === "repeat" && <span style={{ color: C.muted }}> · repeat</span>}
+                {d.status === "pending" && <span style={{ color: C.amber }}> · pending</span>}
               </span>
+              <button
+                onClick={() => setDrafts(drafts.map((x, j) => (
+                  j === i ? { ...x, kind: x.kind === "transfer" ? "normal" : "transfer" } : x)))}
+                title={d.kind === "transfer" ? "Counted as a transfer" : "Counted as income or spending"}
+                style={{ ...btn, flexShrink: 0, padding: "2px 7px", fontSize: 11,
+                  border: `1px solid ${d.kind === "transfer" ? C.accent : C.border}`,
+                  color: d.kind === "transfer" ? C.accent : C.muted }}>⇄</button>
               <span style={{ fontSize: 12, fontVariantNumeric: "tabular-nums", flexShrink: 0,
-                color: d.amount_cents > 0 ? C.accent : C.ink }}>
+                color: d.kind === "transfer" ? C.muted : d.amount_cents > 0 ? C.accent : C.ink }}>
                 {d.amount_cents == null ? "—" : money(d.amount_cents)}
               </span>
             </div>
           ))}
         </div>
 
+        {anchor && (
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 14,
+            padding: "10px 12px", borderRadius: 8, background: C.bg }}>
+            <input type="checkbox" checked={useBalance} id="usebal"
+              onChange={(e) => setUseBalance(e.target.checked)} style={{ marginTop: 2 }} />
+            <label htmlFor="usebal" style={{ fontSize: 12.5, cursor: "pointer", lineHeight: 1.6 }}>
+              Set the opening balance so <strong>{accountName}</strong> reads{" "}
+              <strong>{money(anchor.balance_cents)}</strong> on {anchor.date}, matching the
+              running balance in the file.
+            </label>
+          </div>
+        )}
+
         {error && <div style={{ fontSize: 12, color: C.danger, marginBottom: 10 }}>{error}</div>}
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <button onClick={commit} disabled={busy || !selected}
+          <button onClick={commit} disabled={busy || !canCommit}
             style={{ ...btn, background: C.accent, color: C.accentInk, borderColor: C.accent,
-              fontSize: 13, padding: "8px 16px", opacity: busy || !selected ? 0.5 : 1 }}>
-            {busy ? "Importing…" : `Import ${selected}`}
+              fontSize: 13, padding: "8px 16px", opacity: busy || !canCommit ? 0.5 : 1 }}>
+            {busy ? "Importing…"
+              : selected ? `Import ${selected}`
+              : "Set balance only"}
           </button>
           <button onClick={() => setStep("map")} style={{ ...btn, fontSize: 13, padding: "8px 14px" }}>
             Back
@@ -266,6 +363,12 @@ export function CsvImport({ C, font, accounts, onCheckDuplicates, onImport, onCl
       {result?.skipped > 0 && (
         <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>
           {result.skipped} skipped as duplicates.
+        </div>
+      )}
+      {result?.balanceSet != null && (
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 12, lineHeight: 1.6 }}>
+          Balance reconciled to {money(result.balanceSet)} — opening balance set to{" "}
+          {money(result.startingCents)}.
         </div>
       )}
       <button onClick={onClose}

@@ -193,6 +193,26 @@ export async function importTransactions(userId, rows) {
   return { inserted, skipped };
 }
 
+/**
+ * Wipe one account's ledger, so a bad import can be redone from scratch.
+ * Leaves rows on other accounts alone, including transfers that merely point
+ * at this one — those belong to the account they were imported into.
+ */
+export async function deleteAccountTransactions(userId, accountId) {
+  const db = read();
+  const before = db.transactions.length;
+  db.transactions = db.transactions.filter((t) => t.account_id !== accountId);
+  write(db);
+  return before - db.transactions.length;
+}
+
+/** Rows moving one account on or before `date`, transfers counted from both ends. */
+export async function accountRowsThrough(userId, accountId, date) {
+  return read().transactions.filter((t) => t.date <= date &&
+    (t.account_id === accountId ||
+      (t.kind === "transfer" && t.transfer_account_id === accountId)));
+}
+
 export async function existingHashes(userId, hashes) {
   if (!hashes.length) return new Set();
   const mine = new Set(read().transactions.map((t) => t.import_hash).filter(Boolean));

@@ -140,6 +140,35 @@ export async function importTransactions(userId, rows, chunkSize = 250) {
   return { inserted, skipped };
 }
 
+/**
+ * Wipe one account's ledger, so a bad import can be redone from scratch.
+ * Leaves rows on other accounts alone, including transfers that merely point
+ * at this one — those belong to the account they were imported into.
+ */
+export async function deleteAccountTransactions(userId, accountId) {
+  const { data, error } = await supabase
+    .from("transactions").delete()
+    .eq("user_id", userId).eq("account_id", accountId)
+    .select("id");
+  if (error) fail("clear account", error);
+  return (data || []).length;
+}
+
+/**
+ * Every row that moves one account on or before `date` — both ends of a
+ * transfer included, since the receiving side only carries the account as
+ * transfer_account_id. Used to work out the starting balance a CSV implies.
+ */
+export async function accountRowsThrough(userId, accountId, date) {
+  const { data, error } = await supabase
+    .from("transactions")
+    .select("id, date, amount_cents, kind, account_id, transfer_account_id")
+    .eq("user_id", userId).lte("date", date)
+    .or(`account_id.eq.${accountId},transfer_account_id.eq.${accountId}`);
+  if (error) fail("load account history", error);
+  return data || [];
+}
+
 /** Hashes already present, so the import preview can flag duplicates. */
 export async function existingHashes(userId, hashes) {
   if (!hashes.length) return new Set();

@@ -98,9 +98,17 @@ create index if not exists transactions_user_account_idx
   on public.transactions (user_id, account_id);
 
 -- This is what makes re-importing an overlapping bank export safe.
-create unique index if not exists transactions_user_import_hash_idx
-  on public.transactions (user_id, import_hash)
-  where import_hash is not null;
+--
+-- Deliberately NOT partial. `on_conflict=user_id,import_hash` (what the client
+-- sends for an upsert) can only be inferred against a plain unique index — a
+-- partial one additionally requires the statement to repeat its WHERE
+-- predicate, which PostgREST does not emit, and the import fails with
+-- "no unique or exclusion constraint matching the ON CONFLICT specification".
+-- Nothing is lost: Postgres treats NULLs as distinct, so hand-entered rows
+-- (import_hash is null) are still unconstrained.
+drop index if exists public.transactions_user_import_hash_idx;
+create unique index if not exists transactions_user_import_hash_uniq
+  on public.transactions (user_id, import_hash);
 
 -- ============================================================
 -- row level security

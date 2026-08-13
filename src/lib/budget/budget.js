@@ -29,8 +29,18 @@ export function monthLabel(month) {
      starting — pre-existing balance, history that predates budgeting
 */
 
-export const isSpending = (t) => t.kind === "normal" && t.amount_cents < 0;
-export const isIncome = (t) => t.kind === "normal" && t.amount_cents > 0;
+/**
+ * Income is money arriving with no envelope on it — a salary, a gift.
+ *
+ * A positive amount that *does* carry an envelope is a refund: returning the
+ * groceries you bought is not income, it is the grocery spending coming back.
+ * Treating it as income both inflates earnings and leaves the envelope showing
+ * the gross figure, so a returned purchase can push it over its limit.
+ */
+export const isIncome = (t) => t.kind === "normal" && t.amount_cents > 0 && !t.envelope_id;
+
+/** Everything else that moves real money: outflows, and refunds against them. */
+export const isSpending = (t) => t.kind === "normal" && !isIncome(t);
 
 /* ---------- balances ---------- */
 
@@ -177,7 +187,83 @@ export function guessColumns(header) {
     debit: find("debit", "withdrawal"),
     credit: find("deposit", "credit"),
     note: find("note", "memo", "reference"),
+    balance: find("balance"),
+    // Exports that carry the magnitude in one column and the direction in
+    // another (Capital One writes every amount positive and puts Credit/Debit
+    // in "Transaction Type"). Deliberately not matched on "transaction", which
+    // would collide with "Transaction Description".
+    direction: find("transaction type", "debit/credit", "dr/cr", "type", "details"),
+    status: find("status"),
   };
+}
+
+/**
+ * True when nothing in the amount column is negative — the signature of an
+ * export that relies on a separate direction column. Used to decide whether
+ * to switch that mapping on by default, since forcing a sign on an already
+ * signed file would flip legitimate refunds the wrong way.
+ */
+export function looksUnsigned(rows, amountIndex) {
+  if (amountIndex < 0) return false;
+  let sawNumber = false;
+  for (const cells of rows) {
+    const c = parseMoney(cells[amountIndex]);
+    if (c == null) continue;
+    if (c < 0) return false;
+    sawNumber = true;
+  }
+  return sawNumber;
+}
+
+const DEBIT_WORDS = /debit|withdraw|\bdr\b|w\/d/i;
+const CREDIT_WORDS = /credit|deposit|\bcr\b/i;
+
+/* Phrases only a card issuer writes, and only for money coming *in* to the
+   card: paying it off, a statement credit, redeemed rewards. A bank never
+   thanks you on a checking statement — "DISCOVER E-PAYMENT" leaving a current
+   account carries no such wording — which is what makes these safe to read a
+   sign convention from. */
+const CARD_CREDIT = /thank\s*you|cashback bonus|statement credit|points redeemed/i;
+
+/**
+ * Whether the export writes spending as positive, i.e. needs its signs flipped.
+ *
+ * Decided from rows that can only ever be a credit to the card. If those come
+ * through negative, every sign in the file is the wrong way round. Files with
+ * no such row — every current account here — return false and are left alone.
+ */
+export function detectFlip(rows, mapping) {
+  if (!mapping || mapping.amount < 0) return false;   // debit/credit columns carry their own sign
+  const marks = [];
+  rows.forEach((cells) => {
+    const payee = mapping.payee >= 0 ? String(cells[mapping.payee] || "") : "";
+    if (!CARD_CREDIT.test(payee)) return;
+    const c = parseMoney(cells[mapping.amount]);
+    if (c) marks.push(c);
+  });
+  if (!marks.length) return false;
+  return marks.filter((c) => c < 0).length > marks.length / 2;
+}
+
+/* Phrases that mean "my own money moved between my own accounts" rather than
+   income or spending. Both halves of such a move usually get imported from two
+   different exports, which otherwise invents an expense and a matching income. */
+export const DEFAULT_TRANSFER_PATTERNS = [
+  "transfer", "instant pmt", "real time payment", "dda to dda",
+  "ach pmt", "epay", "e-payment", "autopay", "web pymt", "cardmember serv",
+  "online payment", "internet payment", "mobile payment", "payment thank you",
+  "card online payment", "payment to chase card",
+].join(", ");
+
+export function parseTransferPatterns(text) {
+  return String(text || "")
+    .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+}
+
+export function matchesTransfer(payee, patterns) {
+  if (!patterns.length) return false;
+  const p = String(payee || "").toLowerCase();
+  return patterns.some((pat) => p.includes(pat));
 }
 
 /**
@@ -210,9 +296,15 @@ export function normalizeDate(raw) {
  * treated as the same transaction, so overlapping exports can't double up.
  * Deliberately excludes note and envelope, which the user may edit later.
  */
-export function importHash(accountId, dateKey, amountCents, payee) {
+export function importHash(accountId, dateKey, amountCents, payee, seq = 0) {
   const norm = (payee || "").toLowerCase().replace(/\s+/g, " ").trim().slice(0, 40);
-  const raw = `${accountId}|${dateKey}|${amountCents}|${norm}`;
+  /* `seq` distinguishes genuinely repeated purchases — two identical train
+     fares bought the same day are two transactions, not a double-import. It is
+     stable across overlapping exports because a day's rows come as a set.
+     Occurrence 0 is left unsuffixed so hashes written before this existed still
+     match and don't re-import. */
+  const base = `${accountId}|${dateKey}|${amountCents}|${norm}`;
+  const raw = seq > 0 ? `${base}|#${seq}` : base;
   let h = 5381;
   for (let i = 0; i < raw.length; i++) h = ((h * 33) ^ raw.charCodeAt(i)) >>> 0;
   return `${h.toString(36)}-${raw.length.toString(36)}`;
@@ -222,8 +314,9 @@ export function importHash(accountId, dateKey, amountCents, payee) {
  * Turn parsed rows into draft transactions.
  * `flip` handles exports where outflows are written positive.
  */
-export function rowsToDrafts(rows, mapping, accountId, { flip = false } = {}) {
+export function rowsToDrafts(rows, mapping, accountId, { flip = false, transferPatterns = [] } = {}) {
   const out = [];
+  const seenKey = new Map();          // how many identical rows we've passed
   rows.forEach((cells, idx) => {
     const dateKey = normalizeDate(cells[mapping.date]);
     let cents = null;
@@ -236,26 +329,84 @@ export function rowsToDrafts(rows, mapping, accountId, { flip = false } = {}) {
       else if (credit) cents = Math.abs(credit);
     }
     if (cents != null && flip) cents = -cents;
+
+    /* A mapped direction column is authoritative — it is the only thing that
+       carries the sign in exports that write every amount positive. */
+    if (cents != null && mapping.direction >= 0) {
+      const dir = String(cells[mapping.direction] || "");
+      if (DEBIT_WORDS.test(dir)) cents = -Math.abs(cents);
+      else if (CREDIT_WORDS.test(dir)) cents = Math.abs(cents);
+    }
+
     const payee = mapping.payee >= 0 ? String(cells[mapping.payee] || "").trim() : "";
     const note = mapping.note >= 0 && mapping.note !== mapping.payee
       ? String(cells[mapping.note] || "").trim() : "";
 
+    const balance = mapping.balance >= 0 ? parseMoney(cells[mapping.balance]) : null;
+
     const problem = !dateKey ? "unreadable date" : cents == null ? "unreadable amount" : null;
+
+    // Nth identical row of the day, so repeated purchases keep distinct hashes.
+    let seq = 0;
+    if (!problem) {
+      const key = `${dateKey}|${cents}|${payee.toLowerCase()}`;
+      seq = seenKey.get(key) || 0;
+      seenKey.set(key, seq + 1);
+    }
+
+    const statusCell = mapping.status >= 0 ? String(cells[mapping.status] || "") : "";
+    const pending = /pending|processing|unposted|in progress/i.test(statusCell);
+    const isTransfer = matchesTransfer(payee, transferPatterns);
+
     out.push({
       rowIndex: idx,
       date: dateKey,
       amount_cents: cents,
+      balance_cents: balance,
       payee,
       note,
       account_id: accountId,
       envelope_id: null,
-      kind: "normal",
-      import_hash: dateKey && cents != null ? importHash(accountId, dateKey, cents, payee) : null,
+      transfer_account_id: null,
+      kind: isTransfer ? "transfer" : "normal",
+      import_hash: problem ? null : importHash(accountId, dateKey, cents, payee, seq),
       problem,
-      include: !problem,
+      pending,
+      include: !problem && !pending,
     });
   });
   return out;
+}
+
+/**
+ * The running-balance figure to trust out of a bank export: the one attached
+ * to the newest transaction in the file.
+ *
+ * Exports come both ways round, and several rows can share the newest date, so
+ * the file's own direction decides which of those to take — the last of them
+ * when the file runs oldest-first, the first when it runs newest-first. Either
+ * way the aim is the balance *after* the final movement of that day.
+ */
+export function balanceAnchor(drafts) {
+  const usable = drafts.filter((d) => d.date && d.balance_cents != null && !d.problem);
+  if (!usable.length) return null;
+  const descending = usable[0].date > usable[usable.length - 1].date;
+  const maxDate = usable.reduce((m, d) => (d.date > m ? d.date : m), usable[0].date);
+  const onMax = usable.filter((d) => d.date === maxDate);
+  const pick = descending ? onMax[0] : onMax[onMax.length - 1];
+  return { date: pick.date, balance_cents: pick.balance_cents };
+}
+
+/**
+ * The starting-balance row an account needs so that its balance on `asOf`
+ * equals what the bank says. Everything already in the ledger up to that date
+ * counts against it, so this is the gap the pre-history has to fill.
+ */
+export function startingAdjustment(accountId, asOfBalanceCents, rowsThrough) {
+  const known = sumCents(rowsThrough
+    .filter((t) => t.kind !== "starting")
+    .map((t) => balanceDelta(accountId, t)));
+  return asOfBalanceCents - known;
 }
 
 /** Split drafts into new / duplicate-within-file / already-imported. */
@@ -263,6 +414,9 @@ export function triageDrafts(drafts, existingHashes) {
   const seen = new Set();
   return drafts.map((d) => {
     if (d.problem) return { ...d, status: "error" };
+    // Unposted rows can still change date or amount before they settle, which
+    // would give them a different hash and import a second copy.
+    if (d.pending) return { ...d, status: "pending", include: false };
     if (existingHashes.has(d.import_hash)) return { ...d, status: "duplicate", include: false };
     if (seen.has(d.import_hash)) return { ...d, status: "repeat", include: false };
     seen.add(d.import_hash);
