@@ -1,9 +1,13 @@
 import React, { useState } from "react";
 import { todayKey } from "../../lib/dates.js";
+import { describeSchedule, hasSchedule } from "../../lib/reminders.js";
+import { HabitSchedule } from "./HabitSchedule.jsx";
 
-export function HabitManager({ C, font, habits, onChange, onLoadDemo, onClearHistory, hasHistory, allowDemo, isDemo }) {
+export function HabitManager({ C, font, habits, onChange, onLoadDemo, onClearHistory, hasHistory,
+  allowDemo, isDemo, loc, onNeedLocation }) {
   const [draft, setDraft] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
+  const [openId, setOpenId] = useState(null);
   const live = habits.filter((h) => h.active).sort((a, b) => a.order - b.order);
   const small = { fontFamily: font, fontSize: 12, fontWeight: 600, cursor: "pointer", padding: "4px 8px",
     borderRadius: 6, border: `1px solid ${C.border}`, background: C.surface, color: C.muted };
@@ -29,19 +33,38 @@ export function HabitManager({ C, font, habits, onChange, onLoadDemo, onClearHis
 
   return (
     <div>
-      {live.map((h, i) => (
-        <div key={h.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0",
-          borderBottom: `1px solid ${C.border}` }}>
-          <input value={h.icon} onChange={(e) => patch(h.id, { icon: e.target.value.slice(0, 2) })}
-            aria-label={`Icon for ${h.name}`} style={{ ...field, width: 42, textAlign: "center" }} />
-          <input value={h.name} onChange={(e) => patch(h.id, { name: e.target.value })}
-            aria-label="Habit name" style={{ ...field, flex: 1, minWidth: 0 }} />
-          <button style={small} onClick={() => swap(h.id, -1)} disabled={i === 0} aria-label="Move up">↑</button>
-          <button style={small} onClick={() => swap(h.id, 1)} disabled={i === live.length - 1} aria-label="Move down">↓</button>
-          <button style={{ ...small, color: C.danger }}
-            onClick={() => patch(h.id, { active: false })}>Retire</button>
-        </div>
-      ))}
+      {live.map((h, i) => {
+        const open = openId === h.id;
+        const summary = describeSchedule(h);
+        const nRem = h.reminders?.length || 0;
+        return (
+          <div key={h.id} style={{ borderBottom: `1px solid ${C.border}` }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0" }}>
+              <input value={h.icon} onChange={(e) => patch(h.id, { icon: e.target.value.slice(0, 2) })}
+                aria-label={`Icon for ${h.name}`} style={{ ...field, width: 42, textAlign: "center" }} />
+              <input value={h.name} onChange={(e) => patch(h.id, { name: e.target.value })}
+                aria-label="Habit name" style={{ ...field, flex: 1, minWidth: 0 }} />
+              <button style={small} onClick={() => swap(h.id, -1)} disabled={i === 0} aria-label="Move up">↑</button>
+              <button style={small} onClick={() => swap(h.id, 1)} disabled={i === live.length - 1} aria-label="Move down">↓</button>
+              <button style={{ ...small, color: C.danger }}
+                onClick={() => patch(h.id, { active: false })}>Retire</button>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 0 8px 50px", flexWrap: "wrap" }}>
+              <button onClick={() => setOpenId(open ? null : h.id)}
+                aria-expanded={open}
+                style={{ ...small, borderColor: hasSchedule(h) ? C.accent : C.border,
+                  color: hasSchedule(h) ? C.accent : C.muted }}>
+                {open ? "▾" : "▸"} {summary ? `⏰ ${summary}` : "⏰ Anytime"}
+                {nRem ? ` · ${nRem} reminder${nRem > 1 ? "s" : ""}` : ""}
+              </button>
+            </div>
+            {open && (
+              <HabitSchedule C={C} font={font} habit={h} loc={loc} onNeedLocation={onNeedLocation}
+                onChange={(p) => patch(h.id, p)} />
+            )}
+          </div>
+        );
+      })}
       <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
         <input value={draft} onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") add(); }}

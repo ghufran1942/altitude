@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { cloudEnabled, supabase } from "./supabaseClient.js";
-import { currentNotifState, fireNotification, requestNotifPermission } from "./notifications.js";
+import { cancelAllReminders, currentNotifState, ensureChannel, fireNotification, isNative,
+  requestNotifPermission, scheduleReminders } from "./notifications.js";
 import { loadCloud, loadLocal, saveCloud, saveLocal, subscribeCloud } from "./store.js";
 import Auth from "./Auth.jsx";
 import { Heatmap } from "./components/Heatmap.jsx";
@@ -11,6 +12,7 @@ import { StatsView } from "./components/StatsView.jsx";
 import { DeadlineModal, MoveModal, ShrinkModal } from "./components/TaskModals.jsx";
 import { HabitAnalytics } from "./components/habits/HabitAnalytics.jsx";
 import { HabitManager } from "./components/habits/HabitManager.jsx";
+import { PrayerSettings } from "./components/habits/PrayerSettings.jsx";
 import { addReset, removeReset } from "./lib/since.js";
 import { HabitsToday } from "./components/habits/HabitsToday.jsx";
 import { SinceManager } from "./components/since/SinceManager.jsx";
@@ -18,7 +20,10 @@ import { SinceTracker } from "./components/since/SinceTracker.jsx";
 import { BudgetView } from "./components/budget/BudgetView.jsx";
 import { DEFAULT_SETTINGS, INDENT, QUOTES } from "./lib/constants.js";
 import { daysAgoKey, deadlineState, fmtDeadline, shiftKey, todayKey } from "./lib/dates.js";
-import { demoHabitLog, seedHabits, streakFrom } from "./lib/habits.js";
+import { attachPrayerHabits, demoHabitLog, doneOn, hasPrayerHabit, nextMark, seedHabits, streakFrom,
+  trackingMode } from "./lib/habits.js";
+import { dueNow, pruneFired, upcomingFires } from "./lib/reminders.js";
+import { DEFAULT_PRAYER, prayerLoc } from "./lib/prayer/prayerTimes.js";
 import { counts, endOfSubtree, isHeading, migrateNodes, rollUp, seedNodes } from "./lib/tree.js";
 import { chime, uid } from "./lib/util.js";
 
@@ -86,6 +91,8 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
   const [habits, setHabits] = useState([]);
   const [habitLog, setHabitLog] = useState({}); // { "2026-03-10": { habitId: true } }
   const [demoHabits, setDemoHabits] = useState(false); // habitLog is invented, not real
+  const [prayer, setPrayer] = useState(DEFAULT_PRAYER); // approximate location + method
+  const [firedReminders, setFiredReminders] = useState({}); // "habit|reminder|day": true
   const [sinceItems, setSinceItems] = useState([]);
   const [sinceLog, setSinceLog] = useState({}); // { itemId: ["2026-07-01", ...] }
 
@@ -138,6 +145,9 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
   const [activityView, setActivityView] = useState("focus"); // focus | habits
   const [trackView, setTrackView] = useState("habits");        // habits | since
   const [showHabitManager, setShowHabitManager] = useState(false);
+  const [showPrayerSettings, setShowPrayerSettings] = useState(false);
+  // Ticks each minute so "next up" and the missed-time highlight stay honest.
+  const [now, setNow] = useState(() => new Date());
   const [showSinceManager, setShowSinceManager] = useState(false);
   const [armedReset, setArmedReset] = useState(null); // reset is two-step: arm, then confirm
 
@@ -164,6 +174,8 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
     setHabits(s?.habits?.length ? s.habits : seedHabits());
     setHabitLog(s?.habitLog || {});
     setDemoHabits(!!s?.demoHabits);
+    setPrayer({ ...DEFAULT_PRAYER, ...(s?.prayer || {}) });
+    setFiredReminders(pruneFired(s?.firedReminders || {}));
     setSinceItems(s?.sinceItems || []);
     setSinceLog(s?.sinceLog || {});
     setDark(!!s?.dark);
@@ -171,8 +183,10 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
   }, []);
 
   const serialize = useCallback(
-    () => ({ nodes, sessions, completions, distractions, settings, activeTaskId, reminded, dark, habits, habitLog, demoHabits }),
-    [nodes, sessions, completions, distractions, settings, activeTaskId, reminded, dark, habits, habitLog, demoHabits, sinceItems, sinceLog]
+    () => ({ nodes, sessions, completions, distractions, settings, activeTaskId, reminded, dark,
+      habits, habitLog, demoHabits, prayer, firedReminders, sinceItems, sinceLog }),
+    [nodes, sessions, completions, distractions, settings, activeTaskId, reminded, dark, habits,
+      habitLog, demoHabits, prayer, firedReminders, sinceItems, sinceLog]
   );
 
   /* ---------- load: prefer cloud, fall back to local ---------- */
@@ -207,7 +221,8 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
       if (userId) saveCloud(userId, s);
     }, 500);
     return () => clearTimeout(saveTimer.current);
-  }, [nodes, sessions, completions, distractions, settings, activeTaskId, reminded, dark, habits, habitLog, demoHabits, sinceItems, sinceLog, loaded, userId, serialize]);
+  }, [nodes, sessions, completions, distractions, settings, activeTaskId, reminded, dark, habits,
+    habitLog, demoHabits, prayer, firedReminders, sinceItems, sinceLog, loaded, userId, serialize]);
   /* ---------- realtime: apply edits made on other devices ---------- */
   useEffect(() => {
     if (!userId) return;
@@ -617,20 +632,26 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
   /* ---------- streaks ---------- */
   const streak = useMemo(() => streakFrom(new Set(completions)), [completions]);
 
+  // A day counts toward the streak only if something was actually done on it —
+  // a day where every prayer is marked missed is a logged day, not a kept one.
   const habitStreak = useMemo(
-    () => streakFrom(new Set(Object.keys(habitLog).filter((k) => Object.values(habitLog[k] || {}).some(Boolean)))),
-    [habitLog]
+    () => streakFrom(new Set(Object.keys(habitLog).filter((k) =>
+      habits.some((h) => doneOn(habitLog, k, h.id))))),
+    [habitLog, habits]
   );
 
   function toggleHabit(habitId, dateKey) {
     snapshot("habit");
+    const mode = trackingMode(habits.find((h) => h.id === habitId));
     setHabitLog((log) => {
       const day = { ...(log[dateKey] || {}) };
-      if (day[habitId]) delete day[habitId]; else day[habitId] = true;
-      const next = { ...log };
+      // Plain habits toggle; prayer-style ones cycle on time → delayed → missed → clear.
+      const next = nextMark(day[habitId] ?? null, mode);
+      if (next === null) delete day[habitId]; else day[habitId] = next;
+      const out = { ...log };
       // drop the day entirely when it empties, so the log doesn't fill with {}
-      if (Object.keys(day).length) next[dateKey] = day; else delete next[dateKey];
-      return next;
+      if (Object.keys(day).length) out[dateKey] = day; else delete out[dateKey];
+      return out;
     });
   }
 
@@ -706,7 +727,63 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
   async function enableReminders() {
     const p = await requestNotifPermission();
     setNotifState(p);
-    if (p === "granted") fireNotification("Altitude", "Deadline reminders are on.");
+    if (p === "granted") {
+      ensureChannel();
+      fireNotification("Altitude", "Reminders are on.");
+    }
+  }
+
+  /* ---------- habit reminders ----------
+
+     Two delivery paths, because they have genuinely different limits. A native
+     build hands the whole schedule to the OS up front, so a reminder arrives
+     with the app closed. The web can't do that for a closed tab, so it checks
+     on a timer while open and shows whatever came due since the last look. */
+
+  useEffect(() => {
+    const iv = setInterval(() => setNow(new Date()), 60000);
+    return () => clearInterval(iv);
+  }, []);
+
+  const habitLoc = useMemo(() => prayerLoc(prayer), [prayer]);
+  const firedRef = useRef(firedReminders);
+  useEffect(() => { firedRef.current = firedReminders; }, [firedReminders]);
+
+  // Hand the next few days to the OS. Re-runs whenever anything that moves a
+  // reminder changes — including ticking a habit off, which drops its nudges.
+  useEffect(() => {
+    if (!loaded || !isNative()) return;
+    const fires = upcomingFires(habits, habitLog, habitLoc, new Date(), 3);
+    if (!fires.length) { cancelAllReminders(); return; }
+    const t = setTimeout(() => scheduleReminders(fires), 400); // let rapid edits settle
+    return () => clearTimeout(t);
+  }, [habits, habitLog, habitLoc, loaded]);
+
+  // Web path: poll for anything that came due and hasn't been shown yet.
+  useEffect(() => {
+    if (!loaded || isNative()) return;
+    const check = () => {
+      const hits = dueNow(habits, habitLog, habitLoc, firedRef.current, new Date());
+      if (!hits.length) return;
+      const mark = {};
+      hits.forEach((h) => {
+        mark[h.key] = true;
+        pushToast({ kind: "amber", title: h.title, body: h.body });
+        fireNotification(h.title, h.body);
+      });
+      setFiredReminders((f) => pruneFired({ ...f, ...mark }));
+    };
+    check();
+    const iv = setInterval(check, 30000);
+    // A laptop waking from sleep should catch up immediately, not up to 30s later.
+    const onWake = () => check();
+    document.addEventListener("visibilitychange", onWake);
+    return () => { clearInterval(iv); document.removeEventListener("visibilitychange", onWake); };
+  }, [habits, habitLog, habitLoc, loaded, pushToast]);
+
+  function addPrayerHabits() {
+    snapshot("prayer habits");
+    setHabits((hs) => attachPrayerHabits(hs));
   }
 
   const deadlineItems = useMemo(
@@ -823,6 +900,9 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
       <button style={{ ...iconBtn, ...(overdueCount ? { borderColor: C.danger, color: C.danger } : soonCount ? { borderColor: C.amber, color: C.amber } : {}) }}
         onClick={() => { setShowDeadlines(true); closeMenu(); }}>
         Deadlines{overdueCount ? ` · ${overdueCount} overdue` : soonCount ? ` · ${soonCount} soon` : ""}
+      </button>
+      <button style={iconBtn} onClick={() => { setShowPrayerSettings(true); closeMenu(); }}>
+        Prayer times{prayer.label ? ` · ${prayer.label}` : ""}
       </button>
       <button style={iconBtn} onClick={() => { setShowStats(true); closeMenu(); }}>Stats</button>
       <button style={iconBtn} onClick={() => { setShowLog(true); closeMenu(); }}>
@@ -1124,7 +1204,7 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
           <HabitsToday C={C} font={font} display={display} habits={habits} log={habitLog}
             dateKey={habitDate} onShift={shiftHabitDate} onToggle={toggleHabit}
             onManage={() => setShowHabitManager(true)} compact={isNarrow}
-            viewSwitch={trackSwitch} />
+            viewSwitch={trackSwitch} loc={habitLoc} now={now} />
         ) : (
           <section style={{ background: C.surface, border: `1px solid ${C.border}`,
             borderRadius: 14, padding: isNarrow ? 16 : 22 }}>
@@ -1324,11 +1404,40 @@ export function AltitudeApp({ userId = null, syncOn = false, accountEmail, onSig
 
       {showHabitManager && (
         <Modal C={C} title="Edit habits" onClose={() => setShowHabitManager(false)}>
+          {notifState !== "granted" && notifState !== "unsupported" && habits.some((h) => h.reminders?.length) && (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14,
+              padding: "9px 11px", borderRadius: 8, border: `1px solid ${C.amber}`, background: C.bg }}>
+              <span style={{ fontSize: 12, color: C.muted, flex: 1, minWidth: 180 }}>
+                Reminders are set, but notifications are off — you'll only see them inside Altitude.
+              </span>
+              <button style={{ fontFamily: font, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                padding: "5px 10px", borderRadius: 8, border: `1px solid ${C.amber}`,
+                background: "transparent", color: C.amber }} onClick={enableReminders}>Turn on</button>
+            </div>
+          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+            <button style={{ fontFamily: font, fontSize: 12, fontWeight: 600, cursor: "pointer",
+              padding: "5px 10px", borderRadius: 8, border: `1px solid ${C.border}`,
+              background: C.surface, color: C.muted }}
+              onClick={() => { setShowHabitManager(false); setShowPrayerSettings(true); }}>
+              🕌 Prayer times{prayer.label ? ` · ${prayer.label}` : " · set location"}
+            </button>
+          </div>
           <HabitManager C={C} font={font} habits={habits}
             onChange={(next) => { snapshot("habits"); setHabits(next); }}
             onLoadDemo={loadDemoHabits} onClearHistory={clearHabitHistory}
             hasHistory={Object.keys(habitLog).length > 0}
-            allowDemo={!userId} isDemo={demoHabits} />
+            allowDemo={!userId} isDemo={demoHabits} loc={habitLoc}
+            onNeedLocation={() => { setShowHabitManager(false); setShowPrayerSettings(true); }} />
+        </Modal>
+      )}
+
+      {showPrayerSettings && (
+        <Modal C={C} title="Prayer times" onClose={() => setShowPrayerSettings(false)}>
+          <PrayerSettings C={C} font={font} prayer={prayer}
+            onChange={(next) => { snapshot("prayer settings"); setPrayer(next); }}
+            hasPrayerHabits={hasPrayerHabit(habits)}
+            onAddPrayerHabits={() => { addPrayerHabits(); setShowPrayerSettings(false); setShowHabitManager(true); }} />
         </Modal>
       )}
 
