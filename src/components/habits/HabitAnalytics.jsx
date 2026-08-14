@@ -1,6 +1,27 @@
 import React from "react";
 import { WD_FULL, sinceLabel } from "../../lib/dates.js";
-import { habitStats } from "../../lib/habits.js";
+import { MARK_ORDER, habitStats, markColor } from "../../lib/habits.js";
+
+/* Punctuality for habits tracked as on time / delayed / missed. The bar is the
+   split across the three marks; the number is the share of the times you did
+   pray that were on time. Habits tracked as a plain tick have nothing to show. */
+function OnTime({ C, row, width = 70 }) {
+  const total = row.marks.green + row.marks.yellow + row.marks.red;
+  if (!total) return <span style={{ color: C.muted }}>—</span>;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div style={{ width, height: 5, borderRadius: 3, background: C.ringTrack, overflow: "hidden", display: "flex" }}>
+        {MARK_ORDER.map((m) => (
+          row.marks[m] ? <div key={m} title={`${row.marks[m]} ${m}`}
+            style={{ width: `${(100 * row.marks[m]) / total}%`, background: markColor(C, m) }} /> : null
+        ))}
+      </div>
+      <span style={{ color: C.muted }}>
+        {row.onTime === null ? "—" : `${Math.round(row.onTime * 100)}%`}
+      </span>
+    </div>
+  );
+}
 
 export function WeekdayStrip({ C, wd, size = 14 }) {
   return (
@@ -34,6 +55,8 @@ export function HabitAnalytics({ C, font, display, habits, log, isPhone }) {
   const value = { fontSize: 16, fontWeight: 600 };
   const pctOf = (r) => Math.round(r.rate * 100);
   const atRisk = s.rows.filter((r) => r.atRisk);
+  // The punctuality column only earns its width once something has been graded.
+  const anyGraded = s.rows.some((r) => r.graded > 0 || r.marks.red > 0);
 
   const cards = (
     <div style={{ display: "grid", gridTemplateColumns: isPhone ? "1fr" : "repeat(3, 1fr)", gap: 12, marginBottom: 18 }}>
@@ -88,6 +111,12 @@ export function HabitAnalytics({ C, font, display, habits, log, isPhone }) {
               <div style={{ flex: 1 }} />
               <WeekdayStrip C={C} wd={r.wd} size={12} />
             </div>
+            {(r.graded > 0 || r.marks.red > 0) && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: C.muted, marginTop: 8 }}>
+                <span>on time</span>
+                <OnTime C={C} row={r} width={90} />
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -103,7 +132,9 @@ export function HabitAnalytics({ C, font, display, habits, log, isPhone }) {
       <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: font }}>
         <thead>
           <tr>
-            <th style={th}>Habit</th><th style={th}>90-day rate</th><th style={th}>Streak</th>
+            <th style={th}>Habit</th><th style={th}>90-day rate</th>
+            {anyGraded && <th style={th}>On time</th>}
+            <th style={th}>Streak</th>
             <th style={th}>Best</th><th style={th}>Last done</th><th style={th}>30d vs prior</th>
             <th style={{ ...th, paddingRight: 0 }}>By weekday (Mon–Sun)</th>
           </tr>
@@ -124,6 +155,7 @@ export function HabitAnalytics({ C, font, display, habits, log, isPhone }) {
                   <span style={{ color: C.muted }}>{pctOf(r)}%</span>
                 </div>
               </td>
+              {anyGraded && <td style={td}><OnTime C={C} row={r} /></td>}
               <td style={td}>{r.streak}d</td>
               <td style={{ ...td, color: C.muted }}>{r.best}d</td>
               <td style={{ ...td, color: C.muted }}>{sinceLabel(r.lastKey)}</td>

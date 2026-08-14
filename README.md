@@ -1,6 +1,6 @@
 # Altitude
 
-A focus tool: a Pomodoro timer, a zoomable project hierarchy (Year → Milestone → Project → Task → Micro), and an anti-procrastination toolkit (task-shrink / 2-minute rule, streaks, distraction log, motivational quotes), plus deadlines with reminders and a GitHub-style activity heatmap.
+A focus tool: a Pomodoro timer, a zoomable project hierarchy (Year → Milestone → Project → Task → Micro), and an anti-procrastination toolkit (task-shrink / 2-minute rule, streaks, distraction log, motivational quotes), plus deadlines with reminders, a habit tracker with scheduled times and prayer-time reminders, and a GitHub-style activity heatmap.
 
 It runs three ways from one codebase:
 
@@ -86,19 +86,75 @@ Notes:
 
 ---
 
+## Habit schedules, reminders and prayer times
+
+Open **Edit habits** and expand the ⏰ row under any habit to say when it's due:
+
+- **Anytime** — no time, just a daily tick (the default; nothing changes).
+- **At a time** — a fixed clock time, e.g. 08:00 every day.
+- **With a prayer** — anchored to Tahajjud, Fajr, sunrise, Zuhr, Asr, Maghrib or Isha, with an optional offset ("20 min after Maghrib"). The time is recomputed each day, so it tracks the sun through the year.
+
+Each habit can carry **any number of reminders**, set as offsets from the due time — 30 min before, at the time, 20 min after, or a custom `±minutes`. Marking a habit cancels the rest of that day's reminders for it, and a time that passes unanswered is flagged in amber on the tracker.
+
+### On time, delayed or missed
+
+Every habit is tracked one of two ways, set per habit under **Track** in the same panel:
+
+- **Done or not** — the original single tick. The default for everything except prayers.
+- **On time · delayed · missed** — three marks. The default for prayer-anchored habits.
+
+Tapping cycles through them: nothing → 🟢 on time → 🟡 delayed → 🔴 missed → nothing. The marks carry
+distinct shapes as well as colours (✓ / ! / ✕) so they don't rely on colour alone, and they show in both
+today's list and the three-week grid, which makes a run of late Fajrs obvious at a glance.
+
+What the marks mean elsewhere in the app:
+
+- **Delayed still counts as done** — you prayed, just late — so it keeps your streak and completion rate.
+- **Missed does not count as done**, but it does count as *answered*: it stops that day's remaining
+  reminders and it breaks the streak. Recording your misses honestly never inflates your numbers.
+- The habit analytics grow an **On time** column: a bar showing the green/amber/red split over 90 days,
+  and the share of the prayers you did perform that were on time. Habits tracked with a plain tick show `—`.
+
+Switching a habit between the two modes is non-destructive — existing marks are kept and reappear if you
+switch back.
+
+### Prayer times
+
+**Prayer times** in the header sets an approximate location. Pick the nearest city — prayer times shift
+by well under a minute across a metro area, so Salt Lake City covers West Valley, Sandy and Provo alike.
+"Use my location" is optional and snaps to the nearest listed city rather than storing exact coordinates.
+
+Times are computed **on-device** from the sun's position (no network, no API key, nothing about your location leaves the app), and are shown as instants, so they render correctly in whatever timezone the device is in, DST included. You can pick the calculation method (ISNA, Muslim World League, Umm al-Qura, Karachi, Egyptian, Diyanet and others) and the Asr convention (standard or Hanafi) to match your local masjid. Tahajjud is the last third of the night ending at that morning's Fajr.
+
+**Add the five prayers** creates Fajr, Zuhr, Asr, Maghrib and Isha as habits, each already anchored. If you already track them under any common spelling (Zuhr/Dhuhr, Fajr/Fajar…) it anchors those instead of adding duplicates, and it's safe to press twice.
+
+Above roughly 48° latitude the sun may not cross the horizon at all on some dates; there the app follows the nearest latitude where it does (the *aqrab al-bilad* convention) and says so.
+
+### How reminders are delivered
+
+On the **native iOS/Android builds** the next three days of reminders are handed to the OS in advance, so they arrive with the app closed. On the **web** there's no equivalent for a closed tab, so Altitude checks on a timer while it's open and shows anything that came due in the last few minutes. Either way you need to grant notification permission — the habit editor prompts if reminders are set but permission is off.
+
+---
+
 ## Project layout
 
 ```
 src/
-  App.jsx            main app (Root auth-gate + AltitudeApp) — all UI & logic
-  Auth.jsx           sign-in / sign-up / continue-offline screen
-  store.js           local cache + Supabase load/save/realtime
-  supabaseClient.js  Supabase client (null → local-only mode)
-  notifications.js   web + Capacitor notification abstraction
-  main.jsx           entry; registers the PWA service worker (web only)
-public/icons/        PWA icons
-resources/           1024 icon + splash sources for capacitor-assets
-supabase/schema.sql  database + RLS + realtime setup
+  Altitude.jsx           main app (Root auth-gate + AltitudeApp) — top-level UI & state
+  Auth.jsx               sign-in / sign-up / continue-offline screen
+  store.js               local cache + Supabase load/save/realtime
+  supabaseClient.js      Supabase client (null → local-only mode)
+  notifications.js       web + Capacitor notifications, incl. scheduling reminders ahead
+  main.jsx               entry; registers the PWA service worker (web only)
+  components/            UI, grouped by feature (habits/, since/, budget/)
+  lib/
+    reminders.js         habit schedules → due times → reminder instants
+    prayer/solar.js      sun position: julian day, declination, equation of time
+    prayer/prayerTimes.js prayer times for a date + location; methods & madhab
+    prayer/cities.js     built-in approximate locations
+public/icons/            PWA icons
+resources/               1024 icon + splash sources for capacitor-assets
+supabase/schema.sql      database + RLS + realtime setup
 ```
 
 ## Reset your data
